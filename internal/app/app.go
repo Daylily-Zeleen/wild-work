@@ -286,9 +286,10 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	case provider.Qoder:
 		authURL, err = loginqoder.Start(a.loginClient, a.loginStateFP)
 	default:
-		authURL, err = login.Start(a.loginClient, a.loginStateFP)
+		ep := login.EndpointsForRegion(a.cfg.Region)
+		authURL, err = login.Start(a.loginClient, a.loginStateFP, ep)
 		if err == nil {
-			if resolved, rerr := login.ResolveAuthURL(a.loginClient, authURL); rerr == nil && resolved != "" {
+			if resolved, rerr := login.ResolveAuthURL(a.loginClient, authURL, ep); rerr == nil && resolved != "" {
 				authURL = resolved
 			}
 		}
@@ -362,7 +363,7 @@ func (a *App) pollLogin(ctx context.Context) {
 			}
 			continue
 		}
-		r, err := login.Poll(a.loginClient, a.loginStateFP)
+		r, err := login.Poll(a.loginClient, a.loginStateFP, login.EndpointsForRegion(a.cfg.Region))
 		if err == nil {
 			a.completeLogin(r)
 			return
