@@ -176,6 +176,12 @@ API Key:  WildWorkAPI
 
 在官方客户端里这个模型也会排队，我的办法是 `ds4f` 用 WorkBuddy 的，`ds4p` 用 TraeWork 的。
 
+## 交流群
+
+微信扫码加入「野活儿老白蹬之家」，有问题欢迎在群里反馈：
+
+<img src="wechat_group.jpg" alt="野活儿老白蹬之家 微信群二维码" width="320">
+
 ## License
 
 MIT — 仅供个人学习使用，请遵守各上游平台服务条款。
