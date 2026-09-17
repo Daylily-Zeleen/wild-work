@@ -157,8 +157,9 @@ func (a *App) allStatuses() []pool.Status {
 }
 
 // noExplicitCheckinKinds 不支持显式签到（手动按钮）的渠道。
-// 这些渠道的 DailyCheckin 为无签到语义的实现（Qoder 直接报错；
-// WorkBuddy 国际版实为「免费模型对话保活」），故不提供手动签到入口。
+// Qoder 无签到活动（DailyCheckin 直接报错）；
+// WorkBuddy 国际版改为定时自动对话保活并领取日活奖励（详见 workbuddyai.DailyCheckin），
+// 无需用户手动触发，故也不提供手动签到入口。
 func noExplicitCheckin(k provider.Kind) bool {
 	return k == provider.Qoder || k == provider.WorkBuddyAI
 }
@@ -563,6 +564,9 @@ func (a *App) CheckinAccount(uid string) (scheduler.CheckinResult, error) {
 		return scheduler.CheckinResult{}, fmt.Errorf("unknown account %s", uid)
 	}
 	if noExplicitCheckin(rt.Kind) {
+		if rt.Kind == provider.WorkBuddyAI {
+			return scheduler.CheckinResult{}, fmt.Errorf("workbuddyai 渠道无需手动签到，已定时自动领取日活奖励")
+		}
 		return scheduler.CheckinResult{}, fmt.Errorf("%s 渠道不支持手动签到", rt.Kind)
 	}
 	res, err := rt.Scheduler.CheckinAccount(uid)

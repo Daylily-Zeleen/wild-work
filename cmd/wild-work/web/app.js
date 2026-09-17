@@ -147,9 +147,12 @@ const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", qoder
 const chLabel = (k) => CH_LABEL[k] || "WorkBuddy";
 const chClass = (k) => CH_CLASS[k] || "wb";
 // 不支持显式签到（手动按钮）的渠道：Qoder 无签到活动；
-// WorkBuddy 国际版仅自动保活，不提供手动签到入口。
+// WorkBuddy 国际版不提供手动签到，而是自动对话保活领日活奖励。
 const NO_EXPLICIT_CHECKIN = new Set(["qoder", "workbuddyai"]);
 const noExplicitCheckin = (g) => NO_EXPLICIT_CHECKIN.has(g);
+// 无手动签到渠道的状态文案：国际版是「自动领日活奖励」，其余（Qoder）为「无签到」。
+const NO_CHECKIN_TAG = { workbuddyai: "自动领日活奖励" };
+const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
 
 function renderAccounts() {
   const grid = $("acctList");
@@ -165,16 +168,19 @@ function renderAccounts() {
     const group = chClass(a.group);
     const groupName = chLabel(a.group);
     const noCheckin = noExplicitCheckin(a.group); // 无显式签到，签到按钮灰掉
+    const noCheckinTitle = a.group === "workbuddyai"
+      ? "无需手动签到：定时自动对话保活并领取日活奖励"
+      : `${groupName} 不支持手动签到`;
 
     const checkinTag = a.last_checkin_at
       ? `<span class="tag ${a.last_checkin_ok ? "ok" : "bad"}">${a.last_checkin_ok ? "签到成功" : "签到失败"}</span>`
-      : (noCheckin ? '<span class="tag neutral">无签到</span>' : '<span class="tag neutral">未签到</span>');
+      : (noCheckin ? `<span class="tag neutral" title="${esc(noCheckinTitle)}">${noCheckinText(a.group)}</span>` : '<span class="tag neutral">未签到</span>');
 
     const disabledClass = a.disabled ? " disabled" : "";
     const disableIcon = a.disabled ? "▶" : "⏸";
     const disableTitle = a.disabled ? "启用" : "停用";
     const checkinBtn = noCheckin
-      ? `<span class="icon-op off" title="${groupName} 不支持手动签到" onclick="return false">✓</span>`
+      ? `<span class="icon-op off" title="${esc(noCheckinTitle)}" onclick="return false">✓</span>`
       : `<span class="icon-op" title="签到" onclick="checkin('${a.uid}')">✓</span>`;
 
     return `
@@ -352,12 +358,17 @@ async function refreshAll() {
 
 // ---------- 登录 ----------
 let pendingChannel = null;
+// 无手动签到渠道的登录提示差异文案（国际版会自动领日活奖励）。
+const NO_CHECKIN_LOGIN_HINT = {
+  workbuddyai: "（无需手动签到，定时自动对话保活并领取日活奖励）",
+  qoder: "（Qoder 渠道无签到活动，仅 API 转发）",
+};
 function promptLogin(channel) {
   pendingChannel = channel;
   const name = chLabel(channel);
   $("lcTitle").textContent = "添加 " + name + " 账号";
   $("lcMsg").textContent = noExplicitCheckin(channel)
-    ? `点击「登录${name}」将打开浏览器窗口，请按照指示正常登录${name}账号，登录成功后关闭浏览器窗口即可。（${name} 渠道无签到活动，仅 API 转发）`
+    ? `点击「登录${name}」将打开浏览器窗口，请按照指示正常登录${name}账号，登录成功后关闭浏览器窗口即可。${NO_CHECKIN_LOGIN_HINT[channel] || ""}`
     : `点击「登录${name}」将打开浏览器窗口，请按照指示正常登录${name}账号，登录成功后关闭浏览器窗口即可。`;
   $("btnLoginConfirm").textContent = "登录" + name;
   $("loginConfirmOverlay").classList.remove("hidden");
