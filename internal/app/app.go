@@ -1249,6 +1249,10 @@ type feesModelRow struct {
 	HasContext    bool  `json:"has_context"`
 	ContextWindow int64 `json:"context_window,omitempty"`
 	MaxTokens     int64 `json:"max_tokens,omitempty"`
+	// 能力标记（与 /v1/models 同源），供 UI 在模型 ID 后展示图标。
+	SupportsImages    bool `json:"supports_images"`
+	SupportsReasoning bool `json:"supports_reasoning"`
+	SupportsTools     bool `json:"supports_tools"`
 }
 
 // buildFeesChannels 以「渠道 models 列表」为基准组表：
@@ -1283,6 +1287,10 @@ func buildFeesChannels(modelsByKind map[provider.Kind][]provider.ModelInfo,
 				MaxTokens:     mi.MaxTokens,
 				// 仅上游接口返回的上下文可信；硬编码估算值不展示数字。
 				HasContext: mi.ContextFromAPI,
+				// 能力标记与 /v1/models 同源，保证 UI 图标与接口声明一致。
+				SupportsImages:    mi.SupportsImages,
+				SupportsReasoning: mi.SupportsReasoning,
+				SupportsTools:     mi.SupportsTools,
 			}
 			if p, ok := prices[mi.ID]; ok {
 				row.Priced = p.IsExplicit() // 缺倍率字段（如 auto）不算已定价

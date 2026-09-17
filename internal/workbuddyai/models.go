@@ -17,6 +17,8 @@ import (
 )
 
 // catalogModel 目录原始模型条目。
+// 能力字段来自上游实测返回：supportsImages/supportsReasoning/supportsToolCall
+// 与 disabledMultimodal（true 表示上游显式关闭多模态）。
 type catalogModel struct {
 	ID              string   `json:"id"`
 	Name            string   `json:"name"`
@@ -25,6 +27,17 @@ type catalogModel struct {
 	MaxOutputTokens int64    `json:"maxOutputTokens"`
 	Disabled        bool     `json:"disabled"`
 	Tags            []string `json:"tags"`
+
+	SupportsImages     bool `json:"supportsImages"`
+	SupportsReasoning  bool `json:"supportsReasoning"`
+	SupportsToolCall   bool `json:"supportsToolCall"`
+	DisabledMultimodal bool `json:"disabledMultimodal"`
+}
+
+// imageOK 判定该模型可否接收图像输入：
+// 上游显式声明 supportsImages 且未被 disabledMultimodal 关闭。
+func (m catalogModel) imageOK() bool {
+	return m.SupportsImages && !m.DisabledMultimodal
 }
 
 // catalogResp 目录响应（只取所需字段）。

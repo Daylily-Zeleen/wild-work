@@ -179,6 +179,13 @@ body {
   border: 1px dashed var(--border); cursor: help;
 }
 .fees .rate-note { color: #d97706; font-size: 11px; }
+/* 能力图标：模型 ID 后的小标记，hover 显示文字说明（title） */
+.fees .cap-icons { display: inline-flex; gap: 2px; margin-left: 2px; vertical-align: middle; }
+.fees .cap-icon {
+  display: inline-block; font-size: 11px; line-height: 1;
+  opacity: .75; cursor: help; filter: saturate(.85);
+}
+.fees .cap-icon:hover { opacity: 1; }
 
 /* 配置说明 */
 .docs { font-size: 13px; }

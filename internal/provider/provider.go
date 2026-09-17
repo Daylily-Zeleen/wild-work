@@ -75,6 +75,29 @@ type ModelInfo struct {
 	// false 表示是硬编码估算/占位（如渠道不返回该字段），
 	// 消费方（面板/API）不应把估值当作真实容量展示。
 	ContextFromAPI bool
+	// 以下能力字段均为「已确认为 true」才置 true；数据缺失时保持 false（未知）。
+	// 未知与「明确不支持」在语义上不同，但对消费方（/v1/models 声明、UI 图标）
+	// 的处理一致：不声明该能力。需要区分时由各渠道自行记录来源。
+	SupportsImages    bool // 支持图像输入（多模态视觉）
+	SupportsReasoning bool // 支持思考/推理模式
+	SupportsTools     bool // 支持函数/工具调用
+}
+
+// InputModalities 按 OpenAI 生态惯例给出输入模态列表（OpenRouter/llama.cpp 的
+// architecture.input_modalities 语义）。不支持图像时只返回 ["text"]。
+func (m ModelInfo) InputModalities() []string {
+	if m.SupportsImages {
+		return []string{"text", "image"}
+	}
+	return []string{"text"}
+}
+
+// Modality 返回 OpenRouter 风格的 modality 描述串（如 "text+image->text"）。
+func (m ModelInfo) Modality() string {
+	if m.SupportsImages {
+		return "text+image->text"
+	}
+	return "text->text"
 }
 
 // ModelPricing 模型积分定价（从上游 API 拉取）。

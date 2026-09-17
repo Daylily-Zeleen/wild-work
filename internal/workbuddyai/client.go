@@ -276,6 +276,10 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 			MaxTokens:     m.MaxOutputTokens,
 			// 目录接口真实返回的容量
 			ContextFromAPI: true,
+			// 能力：直接透传上游声明（不自行纠正上游与实际不符的情况）
+			SupportsImages:    m.imageOK(),
+			SupportsReasoning: m.SupportsReasoning,
+			SupportsTools:     m.SupportsToolCall,
 		})
 	}
 	// 硬编码补入目录外可用模型

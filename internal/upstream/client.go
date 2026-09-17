@@ -246,6 +246,20 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 // ModelInfo 动态模型信息（含 maxInputTokens/maxOutputTokens）。
 type ModelInfo = provider.ModelInfo
 
+// catalogModel 目录接口的原始模型条目（含能力字段）。
+type catalogModel struct {
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	MaxInputTokens  int64  `json:"maxInputTokens"`
+	MaxOutputTokens int64  `json:"maxOutputTokens"`
+	Disabled        bool   `json:"disabled"`
+	// 能力字段（上游目录返回）
+	SupportsImages     bool `json:"supportsImages"`
+	SupportsReasoning  bool `json:"supportsReasoning"`
+	SupportsToolCall   bool `json:"supportsToolCall"`
+	DisabledMultimodal bool `json:"disabledMultimodal"`
+}
+
 // FetchModels 调上游动态模型接口。
 // 字段名与上游实际返回对齐：maxInputTokens（非 contextWindow）、maxOutputTokens（非 maxTokens）。
 func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
@@ -278,6 +292,11 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 				MaxInputTokens  int64  `json:"maxInputTokens"`
 				MaxOutputTokens int64  `json:"maxOutputTokens"`
 				Disabled        bool   `json:"disabled"`
+				// 能力字段（国内版目录同样返回，实测可用）
+				SupportsImages     bool `json:"supportsImages"`
+				SupportsReasoning  bool `json:"supportsReasoning"`
+				SupportsToolCall   bool `json:"supportsToolCall"`
+				DisabledMultimodal bool `json:"disabledMultimodal"`
 			} `json:"models"`
 			Agents []struct {
 				Name   string   `json:"name"`
@@ -301,21 +320,9 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	if len(cliIDs) == 0 {
 		return nil, fmt.Errorf("no cli agent models found")
 	}
-	dynMap := make(map[string]struct {
-		ID              string
-		Name            string
-		MaxInputTokens  int64
-		MaxOutputTokens int64
-		Disabled        bool
-	}, len(env.Data.Models))
+	dynMap := make(map[string]catalogModel, len(env.Data.Models))
 	for _, m := range env.Data.Models {
-		dynMap[m.ID] = struct {
-			ID              string
-			Name            string
-			MaxInputTokens  int64
-			MaxOutputTokens int64
-			Disabled        bool
-		}{m.ID, m.Name, m.MaxInputTokens, m.MaxOutputTokens, m.Disabled}
+		dynMap[m.ID] = m
 	}
 	out := make([]ModelInfo, 0, len(cliIDs))
 	for _, id := range cliIDs {
@@ -329,6 +336,10 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 			ContextWindow:  m.MaxInputTokens,
 			ContextFromAPI: true, // 目录接口真实返回
 			MaxTokens:      m.MaxOutputTokens,
+			// 上游显式声明 supportsImages 且未被 disabledMultimodal 关闭
+			SupportsImages:    m.SupportsImages && !m.DisabledMultimodal,
+			SupportsReasoning: m.SupportsReasoning,
+			SupportsTools:     m.SupportsToolCall,
 		})
 	}
 	if len(out) == 0 {

@@ -212,6 +212,7 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"accounts": accounts})
 }
 
+// 静态兜底表无上游能力数据，故不声明能力。
 var workbuddyStaticModels = []provider.ModelInfo{
 	{ID: "glm-5.2", ContextWindow: 131072}, {ID: "glm-5.1", ContextWindow: 131072}, {ID: "glm-5v-turbo", ContextWindow: 131072},
 	{ID: "kimi-k2.7", ContextWindow: 131072}, {ID: "minimax-m3", ContextWindow: 131072}, {ID: "hy3", ContextWindow: 131072},
@@ -219,6 +220,7 @@ var workbuddyStaticModels = []provider.ModelInfo{
 	{ID: "deepseek-v4-pro", ContextWindow: 131072}, {ID: "deepseek-v4-flash", ContextWindow: 131072},
 }
 
+// traework 静态兜底表同样无上游能力数据，不声明能力。
 var traeworkStaticModels = []provider.ModelInfo{
 	{ID: "glm-5.2"}, {ID: "glm-5-turbo"}, {ID: "glm-5"}, {ID: "DeepSeek-V4-Pro"}, {ID: "DeepSeek-V4-Flash"},
 	{ID: "kimi-k2.6"}, {ID: "kimi-k2.7-code"}, {ID: "minimax-m3"}, {ID: "qwen3-coder"}, {ID: "Doubao-Seed-2.1-Pro"},
@@ -253,18 +255,30 @@ func (h *Handler) modelList() []map[string]any {
 			infos = rt.StaticModels
 		}
 		for _, mi := range infos {
-			id := k.String() + "/" + mi.ID
-			entry := map[string]any{"id": id, "object": "model", "created": 1753600000, "owned_by": k.String()}
-			if mi.ContextWindow > 0 {
-				entry["context_length"] = mi.ContextWindow
-			}
-			if mi.MaxTokens > 0 {
-				entry["max_output_tokens"] = mi.MaxTokens
-			}
-			out = append(out, entry)
+			out = append(out, buildModelEntry(k, mi))
 		}
 	}
 	return out
+}
+
+// buildModelEntry 构造单条 /v1/models 条目。
+// OpenAI 官方仅规定 id/object/created/owned_by，未定义能力字段；
+// 多模态能力按 OpenRouter / llama.cpp 通行的 architecture.input_modalities 透传。
+// 上游模型列表接口未返回能力信息时，按惯例回退为 ["text"]。
+func buildModelEntry(k provider.Kind, mi provider.ModelInfo) map[string]any {
+	id := k.String() + "/" + mi.ID
+	entry := map[string]any{"id": id, "object": "model", "created": 1753600000, "owned_by": k.String()}
+	if mi.ContextWindow > 0 {
+		entry["context_length"] = mi.ContextWindow
+	}
+	if mi.MaxTokens > 0 {
+		entry["max_output_tokens"] = mi.MaxTokens
+	}
+	entry["architecture"] = map[string]any{
+		"input_modalities": mi.InputModalities(),
+		"modality":         mi.Modality(),
+	}
+	return entry
 }
 
 func (h *Handler) fetchRuntimeModels(rt *Runtime) []provider.ModelInfo {

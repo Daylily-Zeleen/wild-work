@@ -231,6 +231,38 @@ function renderFees(fees) {
 
   const UNKNOWN_TIP = "上游未返回，请在客户端自行确认";
 
+  // 能力图标：模型 ID 后的小标记，title 属性提供文字描述。
+  // 只展示上游明确声明的能力；未声明的（字段缺失或上游返回 false）不显示图标。
+  const capIcons = (m) => {
+    if (!m) return "";
+    const caps = [];
+    if (m.supports_images) {
+      caps.push(`<span class="cap-icon cap-img" title="支持图像输入（多模态视觉）：可直接发送图片给该模型">👁</span>`);
+    }
+    if (m.supports_reasoning) {
+      caps.push(`<span class="cap-icon cap-reason" title="支持思考/推理模式：回复前会进行推理（可能含 reasoning_content）">🧠</span>`);
+    }
+    if (m.supports_tools) {
+      caps.push(`<span class="cap-icon cap-tool" title="支持函数/工具调用（tool_calls）">🔧</span>`);
+    }
+    return caps.length > 0 ? ` <span class="cap-icons">${caps.join("")}</span>` : "";
+  };
+
+  // 能力文字摘要，拼进模型 tooltip。
+  // 措辞说明：上游模型列表接口未声明某能力时，本工具不自行断言其「不支持」，
+  // 只说「未声明」——避免把缺失信息当成否定结论。
+  const capText = (m) => {
+    if (!m) return null;
+    const yes = [], unknown = [];
+    (m.supports_images ? yes : unknown).push("图像输入");
+    (m.supports_reasoning ? yes : unknown).push("思考模式");
+    (m.supports_tools ? yes : unknown).push("工具调用");
+    const parts = [];
+    if (yes.length) parts.push(`支持：${yes.join("、")}`);
+    if (unknown.length) parts.push(`上游未声明：${unknown.join("、")}`);
+    return parts.join("；");
+  };
+
   // 模型 id 的 tooltip：能拿到上下文则展示，否则明确说未知
   const modelTip = (m) => {
     const parts = [`模型：${m.model}`];
@@ -242,6 +274,8 @@ function renderFees(fees) {
       parts.push("最大输出：未知");
       parts.push("（上游未提供该信息）");
     }
+    const ct = capText(m);
+    if (ct) parts.push(ct);
     return parts.join("\n");
   };
 
@@ -273,8 +307,8 @@ function renderFees(fees) {
     for (let i = 0; i < models.length; i += 2) {
       const m1 = models[i];
       const m2 = models[i + 1];
-      const id1 = m1 ? `<code title="${esc(modelTip(m1))}">${esc(m1.model)}</code>${noteCell(m1)}` : "";
-      const id2 = m2 ? `<code title="${esc(modelTip(m2))}">${esc(m2.model)}</code>${noteCell(m2)}` : "";
+      const id1 = m1 ? `<code title="${esc(modelTip(m1))}">${esc(m1.model)}</code>${capIcons(m1)}${noteCell(m1)}` : "";
+      const id2 = m2 ? `<code title="${esc(modelTip(m2))}">${esc(m2.model)}</code>${capIcons(m2)}${noteCell(m2)}` : "";
       html += `<tr><td>${id1}</td><td>${rateCell(m1)}</td><td>${id2}</td><td>${rateCell(m2)}</td></tr>`;
     }
   }
