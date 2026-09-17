@@ -112,6 +112,10 @@ POST /api/quit                     # 退出程序
 
 ## 6. 关键不变量（改动前必读）
 
+0. **每次代码变更后必须本地重新构建 `dist/wild-work.exe`**（见 §8）。
+   `dist/` 在 `.gitignore` 中，CI 只产出带平台后缀的 `wild-work-<os>-<arch>`，
+   **不会**生成 `dist/wild-work.exe`——该文件只能手动构建。
+   不重建会导致：本地运行的二进制与源码不一致（例如改了版本号但仍显示旧版本）。
 1. `PrepareBody` 三改写勿动：强制 `stream=true`、`tool_choice` 归一化、`developer→system`
 2. 日志/面板/消息框**零 token**：不得输出 access/refresh token（调试用假 token）
 3. auth 文件嵌套格式 `{auth:{...},account:{...}}`，`internal/auth.Parse` 与 login.SaveAuth 必须一致
@@ -137,8 +141,12 @@ POST /api/quit                     # 退出程序
 
 ## 8. 构建
 
+> ⚠️ **本地构建是日常约束**：任何代码变更后都要重新构建 `dist/wild-work.exe`
+> （见 §6 第 0 条）。CI 不生成该文件，且 `dist/` 不入版本控制。
+> 标准流程：`go build ./... && go vet ./... && go test ./...` 全绿后再构建。
+
 ```bash
-# Windows（WSL 交叉编译）
+# Windows（本机直接构建，或 WSL 交叉编译）
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-H windowsgui" -o dist/wild-work.exe ./cmd/wild-work
 
 # macOS（需 macOS 真机或 CI，cgo 必需）
@@ -146,6 +154,14 @@ GOOS=darwin GOARCH=arm64 go build -o dist/wild-work-darwin ./cmd/wild-work
 
 # Linux 无头
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/wild-work-linux ./cmd/wild-work
+```
+
+构建后核对版本号已进二进制（防止拿到旧文件）：
+
+```bash
+# Windows bash 下用 python 字节计数（strings 对 Go 二进制的长串不可靠）
+python -c "b=open('dist/wild-work.exe','rb').read(); print('new:',b.count(b'2.1.0'),'old:',b.count(b'2.0.1'))"
+# 期望：new >= 1 且 old == 0。若旧版本号仍在，说明构建未生效。
 ```
 
 ## 9. 文档索引
