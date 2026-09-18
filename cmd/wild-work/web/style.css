@@ -241,12 +241,21 @@ body {
   box-shadow: 0 4px 16px rgba(0,0,0,.15); font-size: 12px;
   min-width: 300px; max-width: 420px;
 }
-.credit-tip .detail-head {
-  font-weight: 600; margin-bottom: 6px;
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+.credit-tip {
+  position: fixed; display: none; z-index: 150;
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 10px 12px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.15); font-size: 12px;
+  width: 380px; /* 固定宽度：翻页时浮窗不再变形/宽度跳动 */
+  box-sizing: border-box;
 }
+.credit-tip .detail-head {
+  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
+  margin-bottom: 6px;
+}
+.credit-tip .detail-title { font-weight: 600; text-align: right; }
 .credit-tip .detail-count { font-weight: 400; color: var(--muted); font-size: 11px; }
-/* 翻页器在浮窗顶部：鼠标从卡片过来路径最短，且重绘后按钮几何位置不变 */
+/* 翻页器在浮窗顶部居中：鼠标从卡片过来路径最短，不跨出浮窗 */
 .detail-pager { display: inline-flex; align-items: center; gap: 6px; user-select: none; }
 .detail-pg {
   cursor: pointer; padding: 0 8px; border: 1px solid var(--border);
@@ -257,7 +266,7 @@ body {
 .detail-pg.off:hover { background: transparent; }
 .detail-pg-info { color: var(--muted); font-size: 11px; }
 .detail-table { width: 100%; border-collapse: collapse; }
-.detail-table th, .detail-table td { text-align: left; padding: 3px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.detail-table th, .detail-table td { text-align: left; padding: 3px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
 .detail-table th { color: var(--muted); font-weight: 500; font-size: 11px; }
 .detail-table td:nth-child(2), .detail-table td:nth-child(3), .detail-table td:nth-child(4) { text-align: right; }
 .detail-table td:last-child { font-weight: 600; }
