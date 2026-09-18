@@ -223,12 +223,17 @@ const NO_CHECKIN_TAG = { workbuddyai: "自动领日活奖励" };
 const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
 
 // creditsText 账号卡片的积分文案。
-// 存在不可用额度时拆成「可用 / 不可用」两个数字：渠道（如 TraeWork）会下发
-// 官方客户端专用的额度池，对本工具是看得见用不了的，混进一个数字会让人误判可用余额。
+// 始终拆成「可用 / 不可用」两个数字：渠道（如 TraeWork）会下发官方客户端专用的
+// 额度池，对本工具是看得见用不了的，混进一个数字会让人误判可用余额。
+// 即使本账号当前没有专用池（不可用=0）也照样显示，与明细 tooltip 的小计口径一致。
+// 旧版本 state 文件（v2.2.0 及之前，无 unusable 字段）读入后 credits_stale=true，
+// 此时不把旧值当真值，改显示「待刷新」；自动刷新首刷成功后即变回真实拆分。
 function creditsText(a) {
-  const usable = `<span class="credit-num">${a.credits}</span><span>可用积分</span>`;
-  if (!a.unusable_credits) return usable;
-  return usable + `<span class="credit-sep">/</span><span class="credit-unusable">${a.unusable_credits}</span><span>不可用</span>`;
+  if (a.credits_stale) {
+    return `<span class="credit-stale" title="余额口径已过期（旧版本状态文件），正在自动刷新…">待刷新</span>`;
+  }
+  return `<span class="credit-num">${a.credits}</span><span>可用积分</span>`
+       + `<span class="credit-sep">/</span><span class="credit-unusable">${a.unusable_credits || 0}</span><span>不可用</span>`;
 }
 
 function renderAccounts() {

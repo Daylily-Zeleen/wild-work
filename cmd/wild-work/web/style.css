@@ -99,6 +99,12 @@ body {
 /* 可用/不可用拆分：不可用额度降级为次要色，避免被当成可用余额。 */
 .acct-card .acct-credits .credit-sep { margin: 0 3px; color: var(--border); }
 .acct-card .acct-credits .credit-unusable { font-size: 15px; font-weight: 600; color: var(--muted); }
+/* 旧版 state 文件读入后余额口径不可信：显示待刷新而非旧值 */
+.acct-card .acct-credits .credit-stale {
+  font-size: 13px; font-weight: 600; color: var(--muted);
+  animation: stale-pulse 1.6s ease-in-out infinite;
+}
+@keyframes stale-pulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
 .acct-card .acct-checkin { font-size: 11px; }
 .acct-card .acct-ops { display: flex; gap: 4px; justify-content: flex-end; }
 

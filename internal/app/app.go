@@ -1037,8 +1037,10 @@ type AccountView struct {
 	Credits int64 `json:"credits"`
 	// UnusableCredits 账号名下有、但本工具用不了的积分（如 TraeWork ep=1 专用池），
 	// 仅面板展示；0 表示该渠道不区分或没有此类额度。
-	UnusableCredits int64  `json:"unusable_credits"`
-	Cooling         bool   `json:"cooling"`
+	UnusableCredits int64 `json:"unusable_credits"`
+	// CreditsStale 余额口径不可信（旧版 state 或尚未完成首次成功刷新），UI 显示「待刷新」。
+	CreditsStale   bool   `json:"credits_stale,omitempty"`
+	Cooling        bool   `json:"cooling"`
 	Until           string `json:"until"`
 	Reason          string `json:"reason"`
 	Disabled        bool   `json:"disabled"`
@@ -1109,6 +1111,7 @@ func (a *App) accountViews() []AccountView {
 			Nickname:        s.Nickname,
 			Credits:         s.Credits,
 			UnusableCredits: s.UnusableCredits,
+			CreditsStale:    s.CreditsStale,
 			Cooling:         s.Cooling,
 			Until:           fmtTime(s.Until),
 			Reason:          s.Reason,

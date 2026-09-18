@@ -232,10 +232,14 @@ func main() {
 	go qdSch.Run(sctx)
 	go wbaSch.Run(sctx)
 
-	// workbuddyai 无签到活动（不像 CN 那样靠签到顺带拉余额），
-	// 且积分初值为 0 会导致：面板显示错误 + Pick() 按积分排序选错账号。
-	// 故对该渠道做定期自动刷新（启动立即刷一次，之后每 30 分钟）。
-	appInst.StartCreditAutoRefresh(sctx, []provider.Kind{provider.WorkBuddyAI}, app.CreditRefreshInterval)
+	// 积分自动刷新覆盖全部渠道：
+	// - workbuddyai / qoder 无签到活动，不自动刷就会一直显示旧值或 0；
+	// - traework / workbuddy(CN) 虽有签到顺带拉余额，但一天只有两次，
+	//   其间 token 若在别处被轮换（401）也无法自愈；统一纳入循环才能
+	//   启动即出真实拆分数字，并靠 401 自愈（refreshIfSessionDead）及时恢复。
+	appInst.StartCreditAutoRefresh(sctx, []provider.Kind{
+		provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder,
+	}, app.CreditRefreshInterval)
 
 	// 启动即刷新「模型列表 + 费率」，之后每 30 分钟。
 	// 否则刚启动时费率缓存为空，面板下方全是 unknown（需手动点刷新才正常）。

@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -228,5 +229,59 @@ func TestRecordCheckinAndRemove(t *testing.T) {
 	p.Remove("u1")
 	if _, ok := p.Status("u1"); ok {
 		t.Error("account should be removed")
+	}
+}
+
+// TestLoadLegacyStateMarksCreditsStale v2.2.0 及之前的 state 文件无 version/unusable 字段，
+// 读入后必须置 creditsStale，避免面板把旧口径余额当真值（需删除 data 目录才能恢复的兼容缺陷）。
+// 自动刷新首刷成功（SetCreditDetail）后即清除标记。
+func TestLoadLegacyStateMarksCreditsStale(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state-traework.json")
+	legacy := `{"accounts":{"u1":{"credits":5320,"disabled":false}}}`
+	if err := os.WriteFile(fp, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+
+	st, ok := p.Status("u1")
+	if !ok {
+		t.Fatal("账号应存在")
+	}
+	if !st.CreditsStale {
+		t.Errorf("旧格式 state 读入后应标记 credits_stale: %+v", st)
+	}
+	if st.Credits != 5320 {
+		t.Errorf("credits=%d want 5320（旧值保留，仅标记不可信）", st.Credits)
+	}
+
+	// 首刷成功 → 标记清除，数字变为真实拆分
+	p.SetCreditDetail("u1", 2710, 2600)
+	st, _ = p.Status("u1")
+	if st.CreditsStale {
+		t.Error("SetCreditDetail 后不应再标记 stale")
+	}
+	if st.Credits != 2710 || st.UnusableCredits != 2600 {
+		t.Errorf("credits=%d unusable=%d want 2710/2600", st.Credits, st.UnusableCredits)
+	}
+}
+
+// TestLoadCurrentStateNotStale 新版格式（version>=2）读入后不标记 stale。
+func TestLoadCurrentStateNotStale(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state-traework.json")
+	cur := `{"version":2,"accounts":{"u1":{"credits":2710,"unusable":2600}}}`
+	if err := os.WriteFile(fp, []byte(cur), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	st, _ := p.Status("u1")
+	if st.CreditsStale {
+		t.Errorf("新版格式不应标记 stale: %+v", st)
+	}
+	if st.Credits != 2710 || st.UnusableCredits != 2600 {
+		t.Errorf("credits=%d unusable=%d want 2710/2600", st.Credits, st.UnusableCredits)
 	}
 }
