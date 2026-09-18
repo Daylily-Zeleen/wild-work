@@ -419,6 +419,78 @@ func TestAnthropicThinkingBlock(t *testing.T) {
 	})
 }
 
+// TestResponsesFunctionCallRoundTrip 回填轮：客户端原样回传 function_call item 时，
+// 必须还原为 assistant.tool_calls，否则紧随的 function_call_output 会成为「无宿主」
+// 的 role=tool 消息（上游报 11148 tool_call_sequence_broken，Codex CLI 第二轮必失败）。
+func TestResponsesFunctionCallRoundTrip(t *testing.T) {
+	var got []any
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &req)
+		got, _ = req["messages"].([]any)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"c1","choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}`))
+	})
+	_, mux := newTestGateway(inner)
+	rec := post(mux, "/v1/responses", `{"model":"gpt-5","input":[`+
+		`{"role":"user","content":"run it"},`+
+		`{"type":"function_call","call_id":"call_1","name":"shell","arguments":"{\"command\":\"ls\"}"},`+
+		`{"type":"function_call_output","call_id":"call_1","output":"ok"},`+
+		`{"role":"user","content":"what did it print?"}]}`)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(got) != 4 {
+		t.Fatalf("messages len = %d, want 4: %v", len(got), got)
+	}
+	asst, _ := got[1].(map[string]any)
+	if asst["role"] != "assistant" {
+		t.Fatalf("messages[1].role = %v, want assistant（function_call 必须还原为 assistant.tool_calls）", asst["role"])
+	}
+	tcs, _ := asst["tool_calls"].([]any)
+	if len(tcs) != 1 {
+		t.Fatalf("tool_calls = %v", asst["tool_calls"])
+	}
+	tc, _ := tcs[0].(map[string]any)
+	fn, _ := tc["function"].(map[string]any)
+	if tc["id"] != "call_1" || fn["name"] != "shell" || fn["arguments"] != `{"command":"ls"}` {
+		t.Errorf("tool_call = %v", tc)
+	}
+	tool, _ := got[2].(map[string]any)
+	if tool["role"] != "tool" || tool["tool_call_id"] != "call_1" {
+		t.Errorf("messages[2] = %v, want role=tool 紧跟其后", tool)
+	}
+}
+
+// TestResponsesParallelFunctionCalls 并行工具调用：连续多个 function_call 合并进同一条 assistant 消息。
+func TestResponsesParallelFunctionCalls(t *testing.T) {
+	msgs, err := convertResponsesItems([]any{
+		map[string]any{"type": "function_call", "call_id": "c1", "name": "a", "arguments": "{}"},
+		map[string]any{"type": "function_call", "call_id": "c2", "name": "b", "arguments": "{}"},
+		map[string]any{"type": "function_call_output", "call_id": "c1", "output": "1"},
+		map[string]any{"type": "function_call_output", "call_id": "c2", "output": "2"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("messages len = %d, want 3（2 个 function_call 合并 + 2 条 tool）", len(msgs))
+	}
+	asst, _ := msgs[0].(map[string]any)
+	if tcs, _ := asst["tool_calls"].([]any); len(tcs) != 2 {
+		t.Errorf("tool_calls = %v, want 2", asst["tool_calls"])
+	}
+}
+
+// TestResponsesFunctionCallMissingCallID 缺 call_id 必须报错，而不是静默产生坏序列。
+func TestResponsesFunctionCallMissingCallID(t *testing.T) {
+	_, err := convertResponsesItems([]any{map[string]any{"type": "function_call", "name": "a"}})
+	if err == nil {
+		t.Error("缺 call_id 应报错")
+	}
+}
+
 // TestResponsesUsageNoNullDetails usage details 不应输出 null 子字段。
 func TestResponsesUsageNoNullDetails(t *testing.T) {
 	inner := chatFixtureHandler(`{"id":"c1","choices":[{"index":0,"message":{"role":"assistant","content":"x"},"finish_reason":"stop"}],` +

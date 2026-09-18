@@ -194,6 +194,28 @@ func convertResponsesItems(items []any) ([]any, error) {
 		}
 		typ := strings.ToLower(asString(item["type"]))
 
+		// function_call 必须还原为 assistant.tool_calls，否则紧随其后的 function_call_output
+		// 变成「无宿主」的 role=tool 消息，上游会报 11148 tool_call_sequence_broken
+		// （Codex CLI 每轮回填都原样回传上一轮的 function_call item）。
+		if typ == "function_call" {
+			callID := firstNonEmpty(asString(item["call_id"]), asString(item["id"]))
+			if callID == "" {
+				return nil, fmt.Errorf("function_call item requires call_id")
+			}
+			// 连续多个 function_call（并行工具调用）合并进同一条 assistant 消息
+			if n := len(out); n > 0 {
+				if last, ok := out[n-1].(map[string]any); ok && last["role"] == "assistant" && last["tool_calls"] != nil {
+					last["tool_calls"] = append(last["tool_calls"].([]any), functionCallToChatToolCall(callID, item))
+					continue
+				}
+			}
+			out = append(out, map[string]any{
+				"role": "assistant", "content": "",
+				"tool_calls": []any{functionCallToChatToolCall(callID, item)},
+			})
+			continue
+		}
+
 		// function_call_output 必须回填为 role=tool 消息，且紧跟其对应的 function_call
 		if typ == "function_call_output" {
 			callID := firstNonEmpty(asString(item["call_id"]), asString(item["tool_call_id"]))
@@ -239,6 +261,19 @@ func convertResponsesItems(items []any) ([]any, error) {
 		}
 	}
 	return out, nil
+}
+
+// functionCallToChatToolCall 把 Responses 的 function_call item 还原为 Chat 的 tool_calls 元素。
+// arguments 在 Responses 里是 JSON 字符串，原样透传即可（上游按字符串解析）。
+func functionCallToChatToolCall(callID string, item map[string]any) map[string]any {
+	args := asString(item["arguments"])
+	if strings.TrimSpace(args) == "" {
+		args = "{}"
+	}
+	return map[string]any{
+		"id": callID, "type": "function",
+		"function": map[string]any{"name": asString(item["name"]), "arguments": args},
+	}
 }
 
 // convertResponsesContent 转换消息 content：纯文本 → string；含图片 → Chat 内容块数组。
