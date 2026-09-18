@@ -209,6 +209,10 @@ func main() {
 		},
 		MaxTokensCap: cfg.Compat.MaxTokensCap,
 	})
+	// 面板保存 compat 时热更新兼容层路由表（不然新映射要重启才生效）
+	appInst.SetCompatSyncer(func(defaultChannel string, maxTokensCap int, modelMap map[string]string) {
+		compat.SetCompat(defaultChannel, maxTokensCap, modelMap, channels)
+	})
 	mux := http.NewServeMux()
 	compat.Routes(mux) // POST /v1/responses · /v1/messages · /v1/messages/count_tokens
 	mux.Handle("/", inner)

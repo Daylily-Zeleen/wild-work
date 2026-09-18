@@ -77,6 +77,8 @@ const DETAIL_PAGE_SIZE = 8;
 let detailTimer = null;
 let detailCache = {};
 // detailState 当前 tooltip 的展示状态：{uid, page}。
+// detailState 当前 tooltip 的展示状态；interacting=true 表示用户正在翻页，
+// 期间忽略卡片 mouseleave 触发的关闭（重绘会引发虚假 mouseleave）。
 let detailState = null;
 
 async function showCreditDetail(e, uid) {
@@ -133,7 +135,17 @@ function renderCreditDetail() {
   // 避免一列全空或把「无到期信息」误读成「永不过期」。
   const hasExpiry = items.some((it) => it.expire_at);
 
-  let html = `<div class="detail-head">积分明细 <span class="detail-count">共 ${items.length} 条</span></div>`;
+  // 头部：标题+翻页器同一行（翻页器在顶部，鼠标从卡片过来路径最短，
+  // 且重绘后按钮位置不变，不会因鼠标下元素突变丢失事件）。
+  let html = `<div class="detail-head">积分明细 <span class="detail-count">共 ${items.length} 条</span>`;
+  if (pages > 1) {
+    html += `<span class="detail-pager">`;
+    html += `<span class="detail-pg${page === 0 ? " off" : ""}" data-pg="${page - 1}">‹</span>`;
+    html += `<span class="detail-pg-info">${page + 1} / ${pages}</span>`;
+    html += `<span class="detail-pg${page >= pages - 1 ? " off" : ""}" data-pg="${page + 1}">›</span>`;
+    html += `</span>`;
+  }
+  html += `</div>`;
   html += `<table class="detail-table"><thead><tr><th>套餐</th><th>总额</th><th>已用</th><th>剩余</th>`;
   if (hasExpiry) html += `<th>有效期</th>`;
   html += `</tr></thead><tbody>`;
@@ -154,37 +166,41 @@ function renderCreditDetail() {
   html += `<span>可用 <b>${usable}</b></span>`;
   if (unusable > 0) html += `<span class="detail-sum-unusable">不可用 <b>${unusable}</b></span>`;
   html += `</div>`;
-
-  if (pages > 1) {
-    html += `<div class="detail-pager">`;
-    html += `<span class="detail-pg${page === 0 ? " off" : ""}" data-pg="${page - 1}">‹</span>`;
-    html += `<span class="detail-pg-info">${page + 1} / ${pages}</span>`;
-    html += `<span class="detail-pg${page >= pages - 1 ? " off" : ""}" data-pg="${page + 1}">›</span>`;
-    html += `</div>`;
-  }
   tip.innerHTML = html;
   tip.style.display = "block";
 
-  // 翻页：只改状态重绘，不重新请求接口。
+  // 翻页：只改状态重绘，不重新请求接口。翻页器在浮窗顶部，鼠标从卡片
+  // 直接向上/向下即达；重绘后按钮几何位置不变，不丢失事件。
   tip.querySelectorAll(".detail-pg").forEach((btn) => {
     if (btn.classList.contains("off")) return;
     btn.onclick = (ev) => {
       ev.stopPropagation();
       const target = Number(btn.dataset.pg);
-      if (Number.isFinite(target)) { detailState.page = target; renderCreditDetail(); }
+      if (Number.isFinite(target)) {
+        detailState.page = target;
+        detailState.interacting = true;          // 翻页期间关闭 mouseleave 触发的关闭
+        if (detailTimer) { clearTimeout(detailTimer); detailTimer = null; }
+        renderCreditDetail();                     // 重绘（会触发虚假 mouseleave，但被上行挡住）
+        detailState.interacting = false;          // 重绘完成，恢复
+        hideCreditDetail();                       // 重启宽限期定时器
+      }
     };
   });
-  // 每次重绘都要重挂悬停保持：翻页时鼠标早已离开卡片，hideCreditDetail 的
-  // 关闭定时器只剩靠「鼠标在浮窗内」取消；若不重挂，翻到最后一页时浮窗闪关。
+  // 悬停浮窗时取消关闭定时器；离开浮窗立即关闭。
   tip.onmouseenter = () => { if (detailTimer) { clearTimeout(detailTimer); detailTimer = null; } };
   tip.onmouseleave = () => { tip.style.display = "none"; };
 }
 
 function hideCreditDetail() {
+  // interacting=true 表示用户正在翻页（重绘会引发虚假 mouseleave），忽略本次关闭。
+  if (detailState && detailState.interacting) return;
+  // 交互后的宽限期：用户可能正把鼠标移向浮窗或正在浮窗内翻页。
+  if (detailTimer) clearTimeout(detailTimer);
   detailTimer = setTimeout(() => {
     const tip = $("creditTip");
     if (tip) tip.style.display = "none";
-  }, 200);
+    detailTimer = null;
+  }, 800);
   const tip = $("creditTip");
   if (tip) {
     tip.onmouseenter = () => { if (detailTimer) { clearTimeout(detailTimer); detailTimer = null; } };

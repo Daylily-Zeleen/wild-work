@@ -78,6 +78,10 @@ type App struct {
 
 	logFile *os.File
 
+	// compatSyncer 面板保存 compat 后同步给外层兼容层（热更新路由表）。
+	// 由 main.go 注入；nil 时仅写配置不热更（下次启动生效）。
+	compatSyncer func(defaultChannel string, maxTokensCap int, modelMap map[string]string)
+
 	refreshMu  sync.Mutex // 防并发刷新积分
 	refreshing bool
 
@@ -1021,9 +1025,18 @@ func (a *App) SetCompat(defaultChannel string, maxTokensCap int, modelMap map[st
 	if err != nil {
 		return err
 	}
+	// 热更新外层兼容层的路由表：不同步的话新映射要重启才生效。
+	if a.compatSyncer != nil {
+		a.compatSyncer(defaultChannel, maxTokensCap, modelMap)
+	}
 	log.Printf("模型名路由配置已更新：default_channel=%q max_tokens_cap=%d model_map=%d 条",
 		defaultChannel, maxTokensCap, len(modelMap))
 	return nil
+}
+
+// SetCompatSyncer 注入 compat 热更新回调（由 main.go 注入，指向 gateway.SetCompat）。
+func (a *App) SetCompatSyncer(fn func(defaultChannel string, maxTokensCap int, modelMap map[string]string)) {
+	a.compatSyncer = fn
 }
 
 // LoginBusy 是否登录中。
