@@ -174,6 +174,10 @@ function renderCreditDetail() {
       if (Number.isFinite(target)) { detailState.page = target; renderCreditDetail(); }
     };
   });
+  // 每次重绘都要重挂悬停保持：翻页时鼠标早已离开卡片，hideCreditDetail 的
+  // 关闭定时器只剩靠「鼠标在浮窗内」取消；若不重挂，翻到最后一页时浮窗闪关。
+  tip.onmouseenter = () => { if (detailTimer) { clearTimeout(detailTimer); detailTimer = null; } };
+  tip.onmouseleave = () => { tip.style.display = "none"; };
 }
 
 function hideCreditDetail() {
