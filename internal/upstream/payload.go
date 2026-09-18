@@ -45,6 +45,7 @@ func prepareBodyInner(src []byte) []byte {
 	}
 	normalizeToolChoice(obj)
 	normalizeRoles(obj) // developer → system（上游对 developer 角色触发内容过滤误杀）
+
 	// tool 配对两步（见 tool_pairing.go）：先重排再清理。所有模型一律执行（独立于
 	// deepseek-only 的 sanitize 开关）。这是「让请求通过」的安全网——不完整配对的
 	// tool_calls/tool 结果会让上游对之后每条消息都返 400，必须先行剔除；
@@ -60,6 +61,9 @@ func prepareBodyInner(src []byte) []byte {
 	}
 	// 出站脱敏（全改写完成后、Marshal 前）：剥离上游内容审核黑名单指纹
 	// （Claude Code / Codex CLI 注入的模板句、billing header、11128 等，见 sanitize.go）。
+	if msgs, ok := obj["messages"].([]any); ok {
+		sanitizeMessages(msgs)
+	}
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return src
