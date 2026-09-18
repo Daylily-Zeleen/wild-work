@@ -32,7 +32,7 @@ import (
 )
 
 // Version 版本号。
-const Version = "2.2.0"
+const Version = "2.2.1"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -637,6 +637,48 @@ func (a *App) CheckinAll() []scheduler.CheckinResult {
 // 且 Pool.Pick() 按积分排序会因此长期选错账号。
 const CreditRefreshInterval = 30 * time.Minute
 
+// refreshIfSessionDead 上游报「登录态失效」时刷新一次 token 并写回，返回是否已刷新。
+//
+// 为何不能只依赖 NeedsRefresh：它比的是本地 expiresAt，而本地时钟可能是错的——
+// 例如 token 已在别处（另一实例/客户端）被轮换、或上次刷新后未落盘，
+// 此时本地仍显示「有效」而上游已拒绝 → 不刷新就永久卡在 401（积分恒为 0、明细恒为空）。
+// 故必须对 401 本身做一次「刷新 + 重试」。
+func (a *App) refreshIfSessionDead(rt *Runtime, au *auth.Auth, err error) bool {
+	var ue *provider.Error
+	if !errors.As(err, &ue) || ue.Kind != provider.ErrSessionDead {
+		return false
+	}
+	if au.RefreshToken == "" {
+		return false
+	}
+	log.Printf("session dead, refreshing platform=%s uid=%s", rt.Kind, au.UID)
+	if rerr := rt.Upstream.RefreshToken(au); rerr != nil {
+		log.Printf("session dead refresh failed platform=%s uid=%s err=%v", rt.Kind, au.UID, rerr)
+		return false
+	}
+	// 刷新成功必须落盘：否则下次启动又拿旧 token，重回 401。
+	if serr := au.SaveAtomic(); serr != nil {
+		log.Printf("session dead refresh save failed platform=%s uid=%s err=%v", rt.Kind, au.UID, serr)
+	}
+	return true
+}
+
+// creditTotals 一次上游调用同时取回「可消耗余额」与「不可消耗余额」。
+// 两者同源于 UserResourceDetail 的单次响应：remain 即 pool 路由口径的可消耗余额，
+// 不可消耗部分由条目的 Usable 标记汇总得到（渠道不区分专用池时为 0）。
+// 遇 401 自动刷新 token 并重试一次（见 refreshIfSessionDead）。
+func (a *App) creditTotals(rt *Runtime, au *auth.Auth) (usable, unusable int64, err error) {
+	remain, items, err := rt.Upstream.UserResourceDetail(au)
+	if err != nil && a.refreshIfSessionDead(rt, au, err) {
+		remain, items, err = rt.Upstream.UserResourceDetail(au)
+	}
+	if err != nil {
+		return 0, 0, err
+	}
+	_, unusable = provider.Summarize(items)
+	return remain, unusable, nil
+}
+
 // StartCreditAutoRefresh 后台定期刷新指定渠道的账号积分。
 // 启动立即刷一次，之后每隔 interval 一次；单账号失败不影响其他账号。
 //
@@ -671,13 +713,13 @@ func (a *App) StartCreditAutoRefresh(ctx context.Context, kinds []provider.Kind,
 							log.Printf("credit auto-refresh token save failed platform=%s uid=%s err=%v", k, st.UID, err)
 						}
 					}
-					remain, err := rt.Upstream.UserResource(au)
+					usable, unusable, err := a.creditTotals(rt, au)
 					if err != nil {
 						log.Printf("credit auto-refresh failed platform=%s uid=%s err=%v", k, st.UID, err)
 						continue
 					}
-					rt.Pool.SetCredits(st.UID, remain)
-					log.Printf("credit auto-refresh platform=%s uid=%s remain=%d", k, st.UID, remain)
+					rt.Pool.SetCreditDetail(st.UID, usable, unusable)
+					log.Printf("credit auto-refresh platform=%s uid=%s remain=%d unusable=%d", k, st.UID, usable, unusable)
 				}
 			}
 		}
@@ -725,21 +767,21 @@ func (a *App) StartPricingAutoRefresh(ctx context.Context, interval time.Duratio
 	}()
 }
 
-// RefreshCredits 刷新单个账号积分。
+// RefreshCredits 刷新单个账号积分（返回可消耗余额）。
 func (a *App) RefreshCredits(uid string) (int64, error) {
 	rt, au := a.findRuntimeAuth(uid)
 	if rt == nil || au == nil {
 		return 0, fmt.Errorf("unknown account %s", uid)
 	}
 	log.Printf("credits refresh start platform=%s uid=%s", rt.Kind, uid)
-	remain, err := rt.Upstream.UserResource(au)
+	usable, unusable, err := a.creditTotals(rt, au)
 	if err != nil {
 		log.Printf("credits refresh failed platform=%s uid=%s err=%v", rt.Kind, uid, err)
 		return 0, err
 	}
-	rt.Pool.SetCredits(uid, remain)
-	log.Printf("credits refresh success platform=%s uid=%s remain=%d", rt.Kind, uid, remain)
-	return remain, nil
+	rt.Pool.SetCreditDetail(uid, usable, unusable)
+	log.Printf("credits refresh success platform=%s uid=%s remain=%d unusable=%d", rt.Kind, uid, usable, unusable)
+	return usable, nil
 }
 
 // RefreshAll 刷新全部账号积分，返回汇总（供托盘消息框 / Web UI）。
@@ -769,10 +811,10 @@ func (a *App) RefreshAll() RefreshSummary {
 				ps.Accounts = append(ps.Accounts, AccountRefresh{UID: st.UID, OK: false, Msg: "no token"})
 				continue
 			}
-			if remain, err := rt.Upstream.UserResource(au); err == nil {
-				rt.Pool.SetCredits(st.UID, remain)
+			if usable, unusable, err := a.creditTotals(rt, au); err == nil {
+				rt.Pool.SetCreditDetail(st.UID, usable, unusable)
 				ps.OK++
-				ps.Accounts = append(ps.Accounts, AccountRefresh{UID: st.UID, OK: true, Remain: remain})
+				ps.Accounts = append(ps.Accounts, AccountRefresh{UID: st.UID, OK: true, Remain: usable})
 			} else {
 				ps.Failed++
 				ps.Accounts = append(ps.Accounts, AccountRefresh{UID: st.UID, OK: false, Msg: shortErr(err)})
@@ -840,13 +882,19 @@ func (a *App) DisableAccount(uid string, disabled bool) error {
 	return nil
 }
 
-// ResourceDetail 查询单个账号积分明细。
+// ResourceDetail 查询单个账号积分明细（含可用/不可用小计）。
+// 返回的 remain 与 items 同时给出：remain 供 pool 口径对账，items 供 UI 明细展示。
+// 遇 401 自动刷新 token 并重试一次，避免因本地 token 已失效导致明细永远为空。
 func (a *App) ResourceDetail(uid string) (int64, []provider.ResourceItem, error) {
 	rt, au := a.findRuntimeAuth(uid)
 	if rt == nil || au == nil || rt.Upstream == nil {
 		return 0, nil, fmt.Errorf("unknown account %s", uid)
 	}
-	return rt.Upstream.UserResourceDetail(au)
+	remain, items, err := rt.Upstream.UserResourceDetail(au)
+	if err != nil && a.refreshIfSessionDead(rt, au, err) {
+		remain, items, err = rt.Upstream.UserResourceDetail(au)
+	}
+	return remain, items, err
 }
 
 // ---------------------------------------------------------------------------
@@ -982,18 +1030,22 @@ func (a *App) LoginBusy() bool {
 
 // AccountView 面板展示的账号（脱敏）。
 type AccountView struct {
-	UID            string `json:"uid"`
-	Group          string `json:"group"` // workbuddy | traework
-	Nickname       string `json:"nickname"`
-	Credits        int64  `json:"credits"`
-	Cooling        bool   `json:"cooling"`
-	Until          string `json:"until"`
-	Reason         string `json:"reason"`
-	Disabled       bool   `json:"disabled"`
-	ErrCount       int    `json:"err_count"`
-	LastCheckinOK  bool   `json:"last_checkin_ok"`
-	LastCheckinAt  string `json:"last_checkin_at"`
-	LastCheckinMsg string `json:"last_checkin_msg"`
+	UID      string `json:"uid"`
+	Group    string `json:"group"` // workbuddy | workbuddyai | traework | qoder
+	Nickname string `json:"nickname"`
+	// Credits 本工具可消耗的积分余额（pool 路由依据）。
+	Credits int64 `json:"credits"`
+	// UnusableCredits 账号名下有、但本工具用不了的积分（如 TraeWork ep=1 专用池），
+	// 仅面板展示；0 表示该渠道不区分或没有此类额度。
+	UnusableCredits int64  `json:"unusable_credits"`
+	Cooling         bool   `json:"cooling"`
+	Until           string `json:"until"`
+	Reason          string `json:"reason"`
+	Disabled        bool   `json:"disabled"`
+	ErrCount        int    `json:"err_count"`
+	LastCheckinOK   bool   `json:"last_checkin_ok"`
+	LastCheckinAt   string `json:"last_checkin_at"`
+	LastCheckinMsg  string `json:"last_checkin_msg"`
 }
 
 // State Web UI 初始数据。
@@ -1052,18 +1104,19 @@ func (a *App) accountViews() []AccountView {
 	out := make([]AccountView, 0, len(statuses))
 	for _, s := range statuses {
 		out = append(out, AccountView{
-			UID:            s.UID,
-			Group:          a.accountGroup(s.UID),
-			Nickname:       s.Nickname,
-			Credits:        s.Credits,
-			Cooling:        s.Cooling,
-			Until:          fmtTime(s.Until),
-			Reason:         s.Reason,
-			Disabled:       s.Disabled,
-			ErrCount:       s.ErrCount,
-			LastCheckinOK:  s.LastCheckinOK,
-			LastCheckinAt:  fmtTime(s.LastCheckinAt),
-			LastCheckinMsg: s.LastCheckinMsg,
+			UID:             s.UID,
+			Group:           a.accountGroup(s.UID),
+			Nickname:        s.Nickname,
+			Credits:         s.Credits,
+			UnusableCredits: s.UnusableCredits,
+			Cooling:         s.Cooling,
+			Until:           fmtTime(s.Until),
+			Reason:          s.Reason,
+			Disabled:        s.Disabled,
+			ErrCount:        s.ErrCount,
+			LastCheckinOK:   s.LastCheckinOK,
+			LastCheckinAt:   fmtTime(s.LastCheckinAt),
+			LastCheckinMsg:  s.LastCheckinMsg,
 		})
 	}
 	return out
@@ -1219,7 +1272,14 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"remain": remain, "items": items})
+		// 可用/不可用小计在服务端算好，前端只负责展示，避免两边口径漂移。
+		usable, unusable := provider.Summarize(items)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"remain":          remain,
+			"items":           items,
+			"usable_remain":   usable,
+			"unusable_remain": unusable,
+		})
 	})
 	mux.HandleFunc("POST /api/config/checkin_times", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -1486,8 +1546,19 @@ func (a *App) RefreshPricing() {
 				errs = append(errs, fmt.Sprintf("%s: token refresh failed", rt.Kind))
 				continue
 			}
+			// 必须落盘：refresh token 会轮换，不写回则下次启动用的是旧 refresh token，
+			// 而旧 access token 已被上游作废 → 本地 expiresAt 仍显示有效 → 卡死在 401。
+			if serr := acct.SaveAtomic(); serr != nil {
+				log.Printf("pricing token save failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, serr)
+			}
 		}
 		pricing, err := rt.Upstream.FetchModelPricing(acct)
+		if err != nil {
+			// 401 同样先刷新再重试一次，避免费率因过期 token 长期拉不到。
+			if a.refreshIfSessionDead(rt, acct, err) {
+				pricing, err = rt.Upstream.FetchModelPricing(acct)
+			}
+		}
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %s", rt.Kind, shortErr(err)))
 			log.Printf("pricing fetch failed platform=%s err=%v", rt.Kind, err)

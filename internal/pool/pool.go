@@ -39,22 +39,27 @@ func (k CoolKind) String() string {
 
 // Status 单个账号对外暴露的状态（脱敏）。
 type Status struct {
-	UID            string    `json:"uid"`
-	Nickname       string    `json:"nickname,omitempty"`
-	Credits        int64     `json:"credits"`
-	Cooling        bool      `json:"cooling"`
-	Until          time.Time `json:"until,omitempty"`
-	Reason         string    `json:"reason,omitempty"`
-	Disabled       bool      `json:"disabled"`
-	ErrCount       int       `json:"err_count,omitempty"`
-	LastCheckinOK  bool      `json:"last_checkin_ok,omitempty"`
-	LastCheckinAt  time.Time `json:"last_checkin_at,omitempty"`
-	LastCheckinMsg string    `json:"last_checkin_msg,omitempty"`
+	UID      string `json:"uid"`
+	Nickname string `json:"nickname,omitempty"`
+	// Credits 本工具可消耗的积分余额（pool 路由依据）。
+	Credits int64 `json:"credits"`
+	// UnusableCredits 账号名下有、但本工具用不了的积分（如 TraeWork 的 ep=1 专用池）。
+	// 仅用于面板展示，不参与路由；0 表示该渠道不区分或没有此类额度。
+	UnusableCredits int64     `json:"unusable_credits,omitempty"`
+	Cooling         bool      `json:"cooling"`
+	Until           time.Time `json:"until,omitempty"`
+	Reason          string    `json:"reason,omitempty"`
+	Disabled        bool      `json:"disabled"`
+	ErrCount        int       `json:"err_count,omitempty"`
+	LastCheckinOK   bool      `json:"last_checkin_ok,omitempty"`
+	LastCheckinAt   time.Time `json:"last_checkin_at,omitempty"`
+	LastCheckinMsg  string    `json:"last_checkin_msg,omitempty"`
 }
 
 type entry struct {
 	a        *auth.Auth
 	credits  int64
+	unusable int64
 	disabled bool
 	reason   string
 	until    time.Time
@@ -78,6 +83,7 @@ func (e *entry) healthy(now time.Time) bool {
 // stateFile 持久化格式。
 type accountState struct {
 	Credits        int64     `json:"credits"`
+	Unusable       int64     `json:"unusable,omitempty"`
 	Disabled       bool      `json:"disabled"`
 	Reason         string    `json:"reason,omitempty"`
 	Until          time.Time `json:"until,omitempty"`
@@ -165,12 +171,14 @@ func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
 	return best.a
 }
 
-// SetCredits 更新账号余额。
-func (p *Pool) SetCredits(uid string, credits int64) {
+// SetCreditDetail 更新账号积分：usable 为可消耗余额（Pick() 排序依据），
+// unusable 为账号名下有但本工具用不了的额度（如 TraeWork 的 ep=1 专用池），仅面板展示。
+func (p *Pool) SetCreditDetail(uid string, usable, unusable int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
-		e.credits = credits
+		e.credits = usable
+		e.unusable = unusable
 	}
 	p.saveLocked()
 }
@@ -214,11 +222,13 @@ func (p *Pool) SetDisabled(uid string, d bool) {
 }
 
 // ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号处于冷却（非禁用）时恢复。
-func (p *Pool) ReenableIfCredits(uid string, remain int64) {
+// unusable 为不可消耗额度小计（仅面板展示）。
+func (p *Pool) ReenableIfCredits(uid string, remain, unusable int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		e.credits = remain
+		e.unusable = unusable
 		if remain > 0 && !e.disabled {
 			e.until = time.Time{}
 			e.reason = ""
@@ -312,17 +322,18 @@ func (p *Pool) List() []Status {
 func (p *Pool) statusOf(uid string, e *entry) Status {
 	now := time.Now()
 	return Status{
-		UID:            uid,
-		Nickname:       e.a.Nickname,
-		Credits:        e.credits,
-		Cooling:        !e.until.IsZero() && now.Before(e.until),
-		Until:          e.until,
-		Reason:         e.reason,
-		Disabled:       e.disabled,
-		ErrCount:       e.errCount,
-		LastCheckinOK:  e.lastCheckinOK,
-		LastCheckinAt:  e.lastCheckinAt,
-		LastCheckinMsg: e.lastCheckinMsg,
+		UID:             uid,
+		Nickname:        e.a.Nickname,
+		Credits:         e.credits,
+		UnusableCredits: e.unusable,
+		Cooling:         !e.until.IsZero() && now.Before(e.until),
+		Until:           e.until,
+		Reason:          e.reason,
+		Disabled:        e.disabled,
+		ErrCount:        e.errCount,
+		LastCheckinOK:   e.lastCheckinOK,
+		LastCheckinAt:   e.lastCheckinAt,
+		LastCheckinMsg:  e.lastCheckinMsg,
 	}
 }
 
@@ -343,6 +354,7 @@ func (p *Pool) load() {
 		p.byUID[uid] = &entry{
 			a:              &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
 			credits:        s.Credits,
+			unusable:       s.Unusable,
 			disabled:       s.Disabled,
 			reason:         s.Reason,
 			until:          s.Until,
@@ -361,6 +373,7 @@ func (p *Pool) saveLocked() {
 	for uid, e := range p.byUID {
 		sf.Accounts[uid] = accountState{
 			Credits:        e.credits,
+			Unusable:       e.unusable,
 			Disabled:       e.disabled,
 			Reason:         e.reason,
 			Until:          e.until,

@@ -142,6 +142,9 @@ type Upstream interface {
 	FetchModels(a *auth.Auth) ([]ModelInfo, error)
 	FetchModelPricing(a *auth.Auth) ([]ModelPricing, error)
 	UserResource(a *auth.Auth) (int64, error)
+	// UserResourceDetail 返回可消耗余额 + 明细条目（含到期时间与可用性标记）。
+	// 返回的 remain 口径与 UserResource 一致，均为「本工具可消耗」的余额，
+	// 不得包含不可用池——否则 pool 会按虚高余额选号。
 	UserResourceDetail(a *auth.Auth) (int64, []ResourceItem, error)
 	DailyCheckin(a *auth.Auth) error
 	Classify(status int, body string) ErrKind
@@ -159,4 +162,26 @@ type ResourceItem struct {
 	Total  int64  `json:"total"`
 	Used   int64  `json:"used"`
 	Remain int64  `json:"remain"`
+
+	// ExpireAt 该条目到期时刻（RFC3339，UTC+8 墙钟）。空串表示上游未下发到期时间，
+	// 前端据此隐藏「有效期」列——不得用零值时间冒充「永不过期」。
+	ExpireAt string `json:"expire_at,omitempty"`
+	// Usable 标记该条目是否属于本工具可消耗的额度池。
+	// TraeWork 存在按 available_endpoint 划分的专用池（ep=1，官方客户端专用），
+	// 本工具走的是 ep=0；这类额度对用户是「看得见用不了」，需在界面上分开统计。
+	// 注意：零值为 false，故各渠道构造时须显式置位；渠道无此概念时统一填 true。
+	Usable bool `json:"usable"`
+}
+
+// Summarize 按 Usable 标记汇总条目：返回 (可消耗剩余, 不可消耗剩余)。
+// 供 app 层统一填充 ResourceDetail 接口的两个小计字段，避免多处各写一份循环。
+func Summarize(items []ResourceItem) (usable, unusable int64) {
+	for _, it := range items {
+		if it.Usable {
+			usable += it.Remain
+		} else {
+			unusable += it.Remain
+		}
+	}
+	return usable, unusable
 }

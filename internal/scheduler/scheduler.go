@@ -328,8 +328,17 @@ func (s *Scheduler) checkinOne(uid string) CheckinResult {
 			r.Msg = "活跃保活"
 		}
 	}
-	// 无论签到成败都查余额（已签到等业务错误下余额刷新仍有效）
-	remain, rerr := s.cfg.Upstream.UserResource(a)
+	// 无论签到成败都查余额（已签到等业务错误下余额刷新仍有效）。
+	// 用 Detail 而非 UserResource：一次请求同时拿到可消耗余额与不可消耗额度小计。
+	usable, items, rerr := s.cfg.Upstream.UserResourceDetail(a)
+	// 401 再刷一次：DailyCheckin 可能因业务错误（已签到/无活动）提前返回而没走到刷新分支，
+	// 此时本地 token 可能已失效，不重试就会把余额记成 0。
+	if rerr != nil && isSessionDead(rerr) {
+		log.Printf("checkin credits token invalid platform=%s uid=%s, refreshing and retrying", name, uid)
+		if err := s.refreshForCheckin(a, uid); err == nil {
+			usable, items, rerr = s.cfg.Upstream.UserResourceDetail(a)
+		}
+	}
 	if rerr != nil {
 		log.Printf("checkin credits failed platform=%s uid=%s err=%v", name, uid, rerr)
 		r.OK = false // 签到后的积分确认失败，整次操作向 GUI 报告失败
@@ -339,9 +348,10 @@ func (s *Scheduler) checkinOne(uid string) CheckinResult {
 			r.Msg += "；余额查询失败"
 		}
 	} else {
-		r.Remain, r.HasRemain = remain, true
-		log.Printf("checkin credits platform=%s uid=%s remain=%d", name, uid, remain)
-		s.cfg.Pool.ReenableIfCredits(uid, remain)
+		_, unusable := provider.Summarize(items)
+		r.Remain, r.HasRemain = usable, true
+		log.Printf("checkin credits platform=%s uid=%s remain=%d unusable=%d", name, uid, usable, unusable)
+		s.cfg.Pool.ReenableIfCredits(uid, usable, unusable)
 	}
 	return s.finishCheckin(uid, r)
 }

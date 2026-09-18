@@ -45,6 +45,8 @@ let state = null;
 // ---------- 数据加载 ----------
 async function loadState() {
   state = await api("/api/state");
+  // 账号数据已变（刷新/签到/增删），明细缓存随之失效，避免 tooltip 展示旧余额。
+  detailCache = {};
   render();
 }
 
@@ -68,12 +70,21 @@ async function refreshFees() {
 }
 
 // ---------- 积分明细 tooltip ----------
+// 明细条数可能很多（TraeWork 每个签到奖励都是独立条目，常见 30+），
+// 故分页展示：每页 DETAIL_PAGE_SIZE 条，页码状态存在 detailState 里，
+// 翻页不重新请求（detailCache 已缓存该账号的完整响应）。
+const DETAIL_PAGE_SIZE = 8;
 let detailTimer = null;
 let detailCache = {};
+// detailState 当前 tooltip 的展示状态：{uid, page}。
+let detailState = null;
 
 async function showCreditDetail(e, uid) {
   const el = e.currentTarget;
   if (detailTimer) { clearTimeout(detailTimer); detailTimer = null; }
+
+  // 切换到另一个账号时重置页码；同一账号重复 hover 保留原页码。
+  const page = (detailState && detailState.uid === uid) ? detailState.page : 0;
 
   let d = detailCache[uid];
   if (!d) {
@@ -84,12 +95,6 @@ async function showCreditDetail(e, uid) {
   }
   if (!d || !d.items || !d.items.length) return;
 
-  let html = `<table class="detail-table"><thead><tr><th>套餐</th><th>总额</th><th>已用</th><th>剩余</th></tr></thead><tbody>`;
-  for (const it of d.items) {
-    html += `<tr><td>${esc(it.name)}</td><td>${it.total}</td><td>${it.used}</td><td>${it.remain}</td></tr>`;
-  }
-  html += `</tbody></table>`;
-
   let tip = $("creditTip");
   if (!tip) {
     tip = document.createElement("div");
@@ -97,15 +102,78 @@ async function showCreditDetail(e, uid) {
     tip.className = "credit-tip";
     document.body.appendChild(tip);
   }
+
+  const rect = el.getBoundingClientRect();
+  detailState = { uid, page };
+  renderCreditDetail();
+  // 先渲染再量尺寸，才能决定向上还是向下弹出。
+  const h = tip.offsetHeight;
+  let top = rect.bottom + 4;
+  if (top + h > window.innerHeight) top = Math.max(4, rect.top - h - 4);
+  let left = rect.left;
+  if (left + tip.offsetWidth > window.innerWidth) left = Math.max(4, window.innerWidth - tip.offsetWidth - 10);
+  tip.style.left = left + "px";
+  tip.style.top = top + "px";
+}
+
+// renderCreditDetail 按 detailState 重绘 tooltip（含分页控件与可用/不可用小计）。
+function renderCreditDetail() {
+  const tip = $("creditTip");
+  if (!tip || !detailState) return;
+  const d = detailCache[detailState.uid];
+  if (!d || !d.items || !d.items.length) return;
+
+  const items = d.items;
+  const pages = Math.max(1, Math.ceil(items.length / DETAIL_PAGE_SIZE));
+  const page = Math.min(Math.max(0, detailState.page), pages - 1);
+  detailState.page = page;
+  const slice = items.slice(page * DETAIL_PAGE_SIZE, (page + 1) * DETAIL_PAGE_SIZE);
+
+  // 有效期列仅当上游确实下发了到期时间时才出现——渠道未返回则不显示该列，
+  // 避免一列全空或把「无到期信息」误读成「永不过期」。
+  const hasExpiry = items.some((it) => it.expire_at);
+
+  let html = `<div class="detail-head">积分明细 <span class="detail-count">共 ${items.length} 条</span></div>`;
+  html += `<table class="detail-table"><thead><tr><th>套餐</th><th>总额</th><th>已用</th><th>剩余</th>`;
+  if (hasExpiry) html += `<th>有效期</th>`;
+  html += `</tr></thead><tbody>`;
+  for (const it of slice) {
+    // 不可用额度整行淡显 + 角标，与可用额度区分开（如 TraeWork 的官方客户端专用池）。
+    const cls = it.usable ? "" : ' class="detail-unusable"';
+    const tag = it.usable ? "" : '<span class="detail-tag" title="该额度仅供官方客户端使用，本工具无法消耗">不可用</span>';
+    html += `<tr${cls}><td>${esc(it.name)}${tag}</td><td>${it.total}</td><td>${it.used}</td><td>${it.remain}</td>`;
+    if (hasExpiry) html += `<td>${it.expire_at ? esc(it.expire_at) : "-"}</td>`;
+    html += `</tr>`;
+  }
+  html += `</tbody></table>`;
+
+  // 小计行：只在确实存在不可用额度时才拆开展示，否则保持单数字（不制造无意义的 0）。
+  const usable = d.usable_remain || 0;
+  const unusable = d.unusable_remain || 0;
+  html += `<div class="detail-sum">`;
+  html += `<span>可用 <b>${usable}</b></span>`;
+  if (unusable > 0) html += `<span class="detail-sum-unusable">不可用 <b>${unusable}</b></span>`;
+  html += `</div>`;
+
+  if (pages > 1) {
+    html += `<div class="detail-pager">`;
+    html += `<span class="detail-pg${page === 0 ? " off" : ""}" data-pg="${page - 1}">‹</span>`;
+    html += `<span class="detail-pg-info">${page + 1} / ${pages}</span>`;
+    html += `<span class="detail-pg${page >= pages - 1 ? " off" : ""}" data-pg="${page + 1}">›</span>`;
+    html += `</div>`;
+  }
   tip.innerHTML = html;
   tip.style.display = "block";
 
-  const rect = el.getBoundingClientRect();
-  let left = rect.left, top = rect.bottom + 4;
-  if (top + 200 > window.innerHeight) top = rect.top - 200;
-  if (left + 280 > window.innerWidth) left = window.innerWidth - 290;
-  tip.style.left = left + "px";
-  tip.style.top = top + "px";
+  // 翻页：只改状态重绘，不重新请求接口。
+  tip.querySelectorAll(".detail-pg").forEach((btn) => {
+    if (btn.classList.contains("off")) return;
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      const target = Number(btn.dataset.pg);
+      if (Number.isFinite(target)) { detailState.page = target; renderCreditDetail(); }
+    };
+  });
 }
 
 function hideCreditDetail() {
@@ -154,6 +222,15 @@ const noExplicitCheckin = (g) => NO_EXPLICIT_CHECKIN.has(g);
 const NO_CHECKIN_TAG = { workbuddyai: "自动领日活奖励" };
 const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
 
+// creditsText 账号卡片的积分文案。
+// 存在不可用额度时拆成「可用 / 不可用」两个数字：渠道（如 TraeWork）会下发
+// 官方客户端专用的额度池，对本工具是看得见用不了的，混进一个数字会让人误判可用余额。
+function creditsText(a) {
+  const usable = `<span class="credit-num">${a.credits}</span><span>可用积分</span>`;
+  if (!a.unusable_credits) return usable;
+  return usable + `<span class="credit-sep">/</span><span class="credit-unusable">${a.unusable_credits}</span><span>不可用</span>`;
+}
+
 function renderAccounts() {
   const grid = $("acctList");
   const empty = $("acctEmpty");
@@ -199,7 +276,7 @@ function renderAccounts() {
       </div>
       <div class="acct-uid">UID: ${esc(shortUid(a.uid))}</div>
       <div class="acct-mid">
-        <div class="acct-credits" onmouseenter="showCreditDetail(event,'${a.uid}')" onmouseleave="hideCreditDetail()">${a.credits}<span>积分</span></div>
+        <div class="acct-credits" onmouseenter="showCreditDetail(event,'${a.uid}')" onmouseleave="hideCreditDetail()">${creditsText(a)}</div>
         <div class="acct-checkin">${checkinTag}</div>
       </div>
     </div>`;

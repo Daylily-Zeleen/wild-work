@@ -403,64 +403,103 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 
 // UserResource 查询账号当前可花费积分余额（所有套餐 CycleCapacity 聚合，负值钳 0）。
 func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
-	url := c.billingBase(a) + "/v2/billing/meter/get-user-resource"
-	now := time.Now()
-	body := map[string]any{
-		"PageNumber":               1,
-		"PageSize":                 100,
-		"ProductCode":              "p_tcaca",
-		"Status":                   []int{0, 3},
-		"PackageEndTimeRangeBegin": now.Format("2006-01-02 15:04:05"),
-		"PackageEndTimeRangeEnd":   now.Add(365 * 101 * 24 * time.Hour).Format("2006-01-02 15:04:05"),
-	}
-	raw, _ := json.Marshal(body)
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
+	resp, err := c.getUserResource(a)
 	if err != nil {
 		return 0, err
-	}
-	BillingHeaders(req, a)
-	data, err := c.doJSONBilling(req)
-	if err != nil {
-		return 0, err
-	}
-	var resp struct {
-		Response struct {
-			Data struct {
-				Accounts []struct {
-					PackageName         string `json:"PackageName"`
-					CapacitySize        int64  `json:"CapacitySize"`
-					CapacityRemain      int64  `json:"CapacityRemain"`
-					CapacityUsed        int64  `json:"CapacityUsed"`
-					CycleCapacitySize   int64  `json:"CycleCapacitySize"`
-					CycleCapacityRemain int64  `json:"CycleCapacityRemain"`
-					CycleCapacityUsed   int64  `json:"CycleCapacityUsed"`
-				} `json:"Accounts"`
-			} `json:"Data"`
-		} `json:"Response"`
-	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, fmt.Errorf("resource parse: %w", err)
 	}
 	for _, acct := range resp.Response.Data.Accounts {
-		var r int64
-		switch {
-		case acct.CycleCapacitySize > 0:
-			r = acct.CycleCapacityRemain
-		case acct.CycleCapacityRemain > 0 || acct.CycleCapacityUsed > 0:
-			r = acct.CycleCapacityRemain
-		default:
-			r = acct.CapacityRemain
-		}
-		if r < 0 {
-			r = 0
-		}
-		remain += r
+		remain += acct.remain()
 	}
 	return remain, nil
 }
 
 // UserResourceDetail 查询账号积分明细（所有套餐条目）。
 func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceItem, error) {
+	resp, err := c.getUserResource(a)
+	if err != nil {
+		return 0, nil, err
+	}
+	var total int64
+	items := make([]provider.ResourceItem, 0, len(resp.Response.Data.Accounts))
+	for _, acct := range resp.Response.Data.Accounts {
+		tot, used, remain := acct.bill()
+		total += remain
+		items = append(items, provider.ResourceItem{
+			Name:     acct.PackageName,
+			Total:    tot,
+			Used:     used,
+			Remain:   remain,
+			ExpireAt: acct.expireAt(),
+			Usable:   true, // 国内版无端点分区，所有套餐均可被本工具消耗
+		})
+	}
+	return total, items, nil
+}
+
+// softRateResetLoc 上游墙钟时间口径：固定按 UTC+8 解释。
+// 上游下发的 CycleEndTime 等时间串均为国内时区墙钟；用 time.Local 解析会在
+// 非 UTC+8 机器上把到期日算错一天。
+var softRateResetLoc = time.FixedZone("UTC+8", 8*60*60)
+
+// resourceAccount get-user-resource 单套餐条目（UserResource 与 UserResourceDetail 共用）。
+type resourceAccount struct {
+	PackageName         string `json:"PackageName"`
+	CapacitySize        int64  `json:"CapacitySize"`
+	CapacityRemain      int64  `json:"CapacityRemain"`
+	CapacityUsed        int64  `json:"CapacityUsed"`
+	CycleCapacitySize   int64  `json:"CycleCapacitySize"`
+	CycleCapacityRemain int64  `json:"CycleCapacityRemain"`
+	CycleCapacityUsed   int64  `json:"CycleCapacityUsed"`
+	// CycleEndTime 周期结束时间（"2006-01-02 15:04:05"，UTC+8 墙钟）。
+	// 上游不提供 PackageEndTime（R-A/R-B 实测两域 42 字段均无），到期判据即此字段。
+	CycleEndTime string `json:"CycleEndTime"`
+}
+
+// bill 按周期口径优先返回 (总额, 已用, 剩余)；剩余负值钳 0。
+func (r resourceAccount) bill() (tot, used, remain int64) {
+	switch {
+	case r.CycleCapacitySize > 0:
+		tot, used, remain = r.CycleCapacitySize, r.CycleCapacityUsed, r.CycleCapacityRemain
+	case r.CycleCapacityRemain > 0 || r.CycleCapacityUsed > 0:
+		tot, used, remain = r.CycleCapacityRemain+r.CycleCapacityUsed, r.CycleCapacityUsed, r.CycleCapacityRemain
+	default:
+		tot, used, remain = r.CapacitySize, r.CapacityUsed, r.CapacityRemain
+	}
+	if remain < 0 {
+		remain = 0
+	}
+	return tot, used, remain
+}
+
+// remain 单套餐剩余额度（bill 的 remain 分量）。
+func (r resourceAccount) remain() int64 {
+	_, _, remain := r.bill()
+	return remain
+}
+
+// expireAt 把 CycleEndTime 墙钟串转为 YYYY-MM-DD；缺失/不可解析时返回空串。
+func (r resourceAccount) expireAt() string {
+	ts := strings.TrimSpace(r.CycleEndTime)
+	if ts == "" {
+		return ""
+	}
+	if t, err := time.ParseInLocation("2006-01-02 15:04:05", ts, softRateResetLoc); err == nil {
+		return t.Format("2006-01-02")
+	}
+	return ""
+}
+
+// userResourceResp get-user-resource 响应信封。
+type userResourceResp struct {
+	Response struct {
+		Data struct {
+			Accounts []resourceAccount `json:"Accounts"`
+		} `json:"Data"`
+	} `json:"Response"`
+}
+
+// getUserResource 发 get-user-resource 请求并解析响应（两个消费方共享请求体与解析）。
+func (c *Client) getUserResource(a *auth.Auth) (*userResourceResp, error) {
 	url := c.billingBase(a) + "/v2/billing/meter/get-user-resource"
 	now := time.Now()
 	body := map[string]any{
@@ -474,55 +513,18 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 	raw, _ := json.Marshal(body)
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
 	if err != nil {
-		return 0, nil, err
+		return nil, err
 	}
 	BillingHeaders(req, a)
 	data, err := c.doJSONBilling(req)
 	if err != nil {
-		return 0, nil, err
+		return nil, err
 	}
-	var resp struct {
-		Response struct {
-			Data struct {
-				Accounts []struct {
-					PackageName         string `json:"PackageName"`
-					CapacitySize        int64  `json:"CapacitySize"`
-					CapacityRemain      int64  `json:"CapacityRemain"`
-					CapacityUsed        int64  `json:"CapacityUsed"`
-					CycleCapacitySize   int64  `json:"CycleCapacitySize"`
-					CycleCapacityRemain int64  `json:"CycleCapacityRemain"`
-					CycleCapacityUsed   int64  `json:"CycleCapacityUsed"`
-				} `json:"Accounts"`
-			} `json:"Data"`
-		} `json:"Response"`
-	}
+	var resp userResourceResp
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, nil, fmt.Errorf("resource parse: %w", err)
+		return nil, fmt.Errorf("resource parse: %w", err)
 	}
-	var total int64
-	items := make([]provider.ResourceItem, 0, len(resp.Response.Data.Accounts))
-	for _, acct := range resp.Response.Data.Accounts {
-		var total_, used, remain int64
-		switch {
-		case acct.CycleCapacitySize > 0:
-			total_, used, remain = acct.CycleCapacitySize, acct.CycleCapacityUsed, acct.CycleCapacityRemain
-		case acct.CycleCapacityRemain > 0 || acct.CycleCapacityUsed > 0:
-			total_, used, remain = acct.CycleCapacityRemain+acct.CycleCapacityUsed, acct.CycleCapacityUsed, acct.CycleCapacityRemain
-		default:
-			total_, used, remain = acct.CapacitySize, acct.CapacityUsed, acct.CapacityRemain
-		}
-		if remain < 0 {
-			remain = 0
-		}
-		total += remain
-		items = append(items, provider.ResourceItem{
-			Name:   acct.PackageName,
-			Total:  total_,
-			Used:   used,
-			Remain: remain,
-		})
-	}
-	return total, items, nil
+	return &resp, nil
 }
 
 // DailyCheckin 执行每日签到。已签到（业务 code 非 0）也返回错误，调用方按 msg 区分。

@@ -16,9 +16,9 @@ func TestPickHighestCredits(t *testing.T) {
 	p.Add(a1)
 	p.Add(a2)
 	p.Add(a3)
-	p.SetCredits("u1", 100)
-	p.SetCredits("u2", 500)
-	p.SetCredits("u3", 300)
+	p.SetCreditDetail("u1", 100, 0)
+	p.SetCreditDetail("u2", 500, 0)
+	p.SetCreditDetail("u3", 300, 0)
 	got := p.Pick()
 	if got == nil || got.UID != "u2" {
 		t.Fatalf("pick=%+v want u2", got)
@@ -31,8 +31,8 @@ func TestPickSkipsCooling(t *testing.T) {
 	a2 := &auth.Auth{UID: "u2"}
 	p.Add(a1)
 	p.Add(a2)
-	p.SetCredits("u1", 100)
-	p.SetCredits("u2", 50)
+	p.SetCreditDetail("u1", 100, 0)
+	p.SetCreditDetail("u2", 50, 0)
 	p.Cooldown("u1", CoolHard, time.Hour, "test")
 	got := p.Pick()
 	if got == nil || got.UID != "u2" {
@@ -44,7 +44,7 @@ func TestPickExpiredCooldownReturnsToHealthy(t *testing.T) {
 	p := New("")
 	a1 := &auth.Auth{UID: "u1"}
 	p.Add(a1)
-	p.SetCredits("u1", 100)
+	p.SetCreditDetail("u1", 100, 0)
 	p.Cooldown("u1", CoolSoft, time.Millisecond, "429")
 	time.Sleep(5 * time.Millisecond)
 	got := p.Pick()
@@ -66,8 +66,8 @@ func TestPickExcluding(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Add(&auth.Auth{UID: "u2"})
-	p.SetCredits("u1", 100)
-	p.SetCredits("u2", 50)
+	p.SetCreditDetail("u1", 100, 0)
+	p.SetCreditDetail("u2", 50, 0)
 	tried := map[string]bool{"u1": true}
 	got := p.PickExcluding(tried)
 	if got == nil || got.UID != "u2" {
@@ -117,10 +117,15 @@ func TestReenableIfCredits(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Cooldown("u1", CoolHard, time.Hour, "余额不足")
-	p.ReenableIfCredits("u1", 500)
+	p.ReenableIfCredits("u1", 500, 120)
 	got := p.Pick()
 	if got == nil || got.UID != "u1" {
 		t.Fatalf("should reenable, pick=%+v", got)
+	}
+	// 不可消耗额度应被记录供面板展示，但不影响可消耗余额。
+	st, _ := p.Status("u1")
+	if st.Credits != 500 || st.UnusableCredits != 120 {
+		t.Errorf("credits=%d unusable=%d, want 500/120", st.Credits, st.UnusableCredits)
 	}
 }
 
@@ -128,7 +133,7 @@ func TestReenableZeroCreditsKeepsCooling(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Cooldown("u1", CoolHard, time.Hour, "余额不足")
-	p.ReenableIfCredits("u1", 0)
+	p.ReenableIfCredits("u1", 0, 0)
 	if p.Pick() != nil {
 		t.Fatal("zero credits should stay cooling")
 	}
@@ -138,7 +143,7 @@ func TestReenableDoesNotTouchDisabled(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Disable("u1", "session dead")
-	p.ReenableIfCredits("u1", 500)
+	p.ReenableIfCredits("u1", 500, 0)
 	if p.Pick() != nil {
 		t.Fatal("disabled must not auto-reenable")
 	}
@@ -176,7 +181,7 @@ func TestList(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1", Nickname: "nick1"})
 	p.Add(&auth.Auth{UID: "u2"})
-	p.SetCredits("u1", 42)
+	p.SetCreditDetail("u1", 42, 0)
 	p.Cooldown("u2", CoolSoft, time.Minute, "429")
 	list := p.List()
 	if len(list) != 2 {
