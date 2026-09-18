@@ -506,6 +506,15 @@ function openApiConfig() {
   } else {
     $("customHostRow").classList.add("hidden");
   }
+  // 模型路由
+  const cc = state.compat || {};
+  const channels = cc.channels || [];
+  $("selCh").innerHTML = channels.map(c => `<option value="${c}">${c}</option>`).join("");
+  $("selCh").value = cc.default_channel || (channels[0] || "");
+  $("inMaxTok").value = cc.max_tokens_cap || 0;
+  const map = cc.model_map || {};
+  const entries = Object.entries(map);
+  $("mapSummary").textContent = entries.length === 0 ? "（空）" : entries.map(([k,v]) => `${k} → ${v}`).join("\u00A0 \u00A0");
   $("apiConfigOverlay").classList.remove("hidden");
 }
 
@@ -519,7 +528,25 @@ async function saveApiConfig() {
   const port = parseInt($("inPort").value, 10);
   try {
     await api("/api/config/listen", { host, port });
-    toast("监听已切换");
+  } catch (e) { toast(e.message); return; }
+
+  const defaultChannel = $("selCh").value;
+  const maxTokensCap = parseInt($("inMaxTok").value, 10) || 0;
+  const raw = prompt("模型名映射（一行一条，格式：客户端名 = channel/model）\n支持通配：claude-* = workbuddy/glm-5.2",
+    Object.entries(state.compat?.model_map || {}).map(([k,v]) => `${k} = ${v}`).join("\n"));
+  if (raw === null) { closeApiConfig(); return; } // 用户取消
+  const modelMap = {};
+  for (const line of raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean)) {
+    if (line.startsWith("#")) continue;
+    const idx = line.indexOf("=");
+    if (idx < 0) { toast(`格式错误：${line}`); return; }
+    const k = line.substring(0, idx).trim(), v = line.substring(idx+1).trim();
+    if (!k || !v) { toast(`格式错误：${line}`); return; }
+    modelMap[k] = v;
+  }
+  try {
+    await api("/api/config/compat", { default_channel: defaultChannel, max_tokens_cap: maxTokensCap, model_map: modelMap });
+    toast("模型路由已更新");
     closeApiConfig();
     loadState();
   } catch (e) { toast(e.message); }

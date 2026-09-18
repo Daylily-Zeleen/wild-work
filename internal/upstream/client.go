@@ -4,10 +4,12 @@ package upstream
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -20,13 +22,18 @@ import (
 type ErrKind = provider.ErrKind
 
 const (
-	ErrNone        = provider.ErrNone        // 成功
-	ErrHardCredit  = provider.ErrHardCredit  // 余额不足（402 或 body 关键词）→ 长冷却
-	ErrSoftRate    = provider.ErrSoftRate    // 429 软限流 → 短冷却
-	ErrSessionDead = provider.ErrSessionDead // 401 + 12153 offline session 失效 → 禁用
-	ErrNotFound    = provider.ErrNotFound    // 404 上游偶发 → 短冷却不累计 errCount（防雪崩）
-	ErrServer      = provider.ErrServer      // 5xx 上游故障
-	ErrClient      = provider.ErrClient      // 其他 4xx / 业务错误
+	ErrNone           = provider.ErrNone           // 成功
+	ErrHardCredit     = provider.ErrHardCredit     // 余额/权益不足 → 长冷却
+	ErrSoftRate       = provider.ErrSoftRate       // 429 软限流 → 短冷却
+	ErrSessionDead    = provider.ErrSessionDead    // 登录态失效 → 禁用
+	ErrNotFound       = provider.ErrNotFound       // 404 上游偶发 → 短冷却不累计 errCount
+	ErrServer         = provider.ErrServer         // 5xx 上游故障
+	ErrClient         = provider.ErrClient         // 其他 4xx / 业务错误
+	ErrContentBlocked  = provider.ErrContentBlocked // 内容拦截
+	ErrPromptTooLong   = provider.ErrPromptTooLong  // 上下文超限
+	ErrWafBlock        = provider.ErrWafBlock       // WAF 拦截
+	ErrAccountFault    = provider.ErrAccountFault   // 账号级故障
+	ErrModelBlocked    = provider.ErrModelBlocked   // 模型不存在
 )
 
 // Error 带分类的上游错误。
@@ -43,22 +50,37 @@ var hardMarkers = []string{
 var sessionDeadMarkers = []string{"Offline user session not found", "12153"}
 
 // Classify 按 HTTP 状态码 + body 判定错误类别。
+// 内容拦截 marker（小写子串匹配）。
+var contentBlockedMarkers = []string{
+	"blocked by security policy",
+	"unapproved channel",
+	"illegal api invocation",
+}
+
+// Classify 按 HTTP 状态码 + body 判定错误类别。
+// 429 必须在 hardMarkers 之前——限流 body 高频带 "quota exceeded"，先判 hardRule 会误归 12h 硬冷却。
 func Classify(status int, body string) ErrKind {
 	if status == http.StatusPaymentRequired {
 		return ErrHardCredit
 	}
 	lower := strings.ToLower(body)
-	for _, m := range hardMarkers {
-		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
-			return ErrHardCredit
-		}
-	}
 	for _, m := range sessionDeadMarkers {
 		if strings.Contains(body, m) {
 			return ErrSessionDead
 		}
 	}
 	if status == http.StatusTooManyRequests {
+		return ErrSoftRate
+	}
+	for _, m := range hardMarkers {
+		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
+			return ErrHardCredit
+		}
+	}
+	// 非 429 但 body 含限流文案（200+11140/400）→ 软限流
+	if strings.Contains(lower, "rate limit") || strings.Contains(lower, "rate-limiting") ||
+		strings.Contains(lower, "too many requests") || strings.Contains(lower, "usage limit") ||
+		strings.Contains(lower, "请求过于频繁") || strings.Contains(lower, "限流") {
 		return ErrSoftRate
 	}
 	if status == http.StatusNotFound {
@@ -68,6 +90,28 @@ func Classify(status int, body string) ErrKind {
 		return ErrServer
 	}
 	if status >= 400 {
+		// 专项分类在通用 4xx 之前：区分「请求问题」与「账号问题」。
+		if status == http.StatusBadRequest || status == http.StatusNotFound {
+			if strings.Contains(lower, "prompt is too long") || strings.Contains(lower, `"code":11115`) {
+				return ErrPromptTooLong
+			}
+			if strings.Contains(body, `"code":11101`) || strings.Contains(body, "Unmarshal chat params failed") {
+				return ErrClient // BadParams：不罚号但仍轮转
+			}
+		}
+		for _, m := range contentBlockedMarkers {
+			if strings.Contains(lower, m) {
+				return ErrContentBlocked
+			}
+		}
+		// WAF 403：无业务信封的拦截形态
+		if status == http.StatusForbidden && !strings.Contains(body, `"code":`) && strings.TrimSpace(body) != "" {
+			return ErrWafBlock
+		}
+		// 账号级故障（11140/14017）
+		if strings.Contains(lower, "request illegal") || strings.Contains(lower, "trial not activated") {
+			return ErrAccountFault
+		}
 		return ErrClient
 	}
 	// HTTP 200 但业务 code 非 0 且含余额关键词的情况已被上面 hardMarkers 捕获。
@@ -94,13 +138,9 @@ type Client struct {
 	BillingBaseGlob string
 }
 
-// New 生产默认值。配置连接池减少 TLS 握手。
+// New 生产默认值。Transport 加固：禁 h2 + Dial 超时/keepalive + TLS 握手超时 + ResponseHeaderTimeout。
 func New() *Client {
-	tr := &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 20,
-		IdleConnTimeout:     90 * time.Second,
-	}
+	tr := newTransport()
 	return &Client{
 		HTTP:            &http.Client{Timeout: 120 * time.Second, Transport: tr},
 		BillingHTTP:     &http.Client{Timeout: 30 * time.Second, Transport: tr},
@@ -108,6 +148,19 @@ func New() *Client {
 		BillingBaseCN:   "https://www.codebuddy.cn",
 		ChatBaseGlobal:  "https://www.workbuddy.ai",
 		BillingBaseGlob: "https://www.workbuddy.ai",
+	}
+}
+
+func newTransport() *http.Transport {
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 15 * time.Second}
+	return &http.Transport{
+		DialContext:           dialer.DialContext,
+		TLSNextProto:          make(map[string]func(string, *tls.Conn) http.RoundTripper),
+		TLSHandshakeTimeout:   10 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       30 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
 	}
 }
 
@@ -268,7 +321,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
+	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json")
 	origin := originRefererFor(a)
 	req.Header.Set("Origin", origin)
@@ -494,10 +547,10 @@ func (c *Client) DailyCheckin(a *auth.Auth) error {
 func (c *Client) Classify(status int, body string) provider.ErrKind { return Classify(status, body) }
 
 // Stream 实现 provider.Upstream（WorkBuddy 上游已是 OpenAI SSE，直接透传）。
-func (c *Client) Stream(w http.ResponseWriter, r io.Reader) error { return Stream(w, r) }
+func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) error { return Stream(w, r) }
 
 // Aggregate 实现 provider.Upstream（WorkBuddy OpenAI SSE 聚合）。
-func (c *Client) Aggregate(r io.Reader) (map[string]any, error) { return Aggregate(r) }
+func (c *Client) Aggregate(r io.Reader, model string) (map[string]any, error) { return Aggregate(r) }
 
 // FetchModelPricing 从 /console/enterprises/personal/models 拉取模型积分倍率。
 // 返回全量模型定价（含 credits 字段），不受 cli agent 过滤限制。
@@ -507,7 +560,7 @@ func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
+	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json")
 	origin := originRefererFor(a)
 	req.Header.Set("Origin", origin)

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"wild-work/internal/app"
 	"wild-work/internal/auth"
 	"wild-work/internal/config"
+	"wild-work/internal/gateway"
 	"wild-work/internal/platform"
 	"wild-work/internal/pool"
 	"wild-work/internal/provider"
@@ -140,12 +142,12 @@ func main() {
 		CheckinMinutes: checkinMinutes, KeepaliveHours: nil, ActivitiesOnly: true})
 
 	runtimes := map[provider.Kind]*server.Runtime{
-		provider.WorkBuddy:   {Kind: provider.WorkBuddy, Pool: wbPool, Upstream: wbUp, StaticModels: server.WorkBuddyStaticModels()},
+		provider.WorkBuddy: {Kind: provider.WorkBuddy, Pool: wbPool, Upstream: wbUp, StaticModels: server.WorkBuddyStaticModels()},
 		provider.WorkBuddyAI: {Kind: provider.WorkBuddyAI, Pool: wbaPool, Upstream: wbaUp, StaticModels: workbuddyai.StaticModels(),
 			// 国际版网关实测间歇性 502/503/504，账号本身健康，不计入账号错误
 			NoCooldownOnServerError: true},
-		provider.TraeWork:    {Kind: provider.TraeWork, Pool: trPool, Upstream: trUp, StaticModels: server.TraeWorkStaticModels()},
-		provider.Qoder:       {Kind: provider.Qoder, Pool: qdPool, Upstream: qdUp, StaticModels: qoder.StaticModels()},
+		provider.TraeWork: {Kind: provider.TraeWork, Pool: trPool, Upstream: trUp, StaticModels: server.TraeWorkStaticModels()},
+		provider.Qoder:    {Kind: provider.Qoder, Pool: qdPool, Upstream: qdUp, StaticModels: qoder.StaticModels()},
 	}
 	appRuntimes := map[provider.Kind]*app.Runtime{
 		provider.WorkBuddy:   {Kind: provider.WorkBuddy, Pool: wbPool, Upstream: wbUp, Scheduler: wbSch},
@@ -179,7 +181,7 @@ func main() {
 	if err != nil {
 		fatal("embed web: %v", err)
 	}
-	h := server.NewHandler(server.Config{
+	inner := server.NewHandler(server.Config{
 		Runtimes:     runtimes,
 		APIKey:       cfg.APIKey,
 		HardCooldown: cfg.HardCreditDur,
@@ -189,7 +191,34 @@ func main() {
 		WebUI:        sub,
 		AttachAPI:    appInst.HandleAPI,
 	})
-	appInst.SetHandler(h)
+
+	// 两层结构：外层兼容层只接管三个新端点，其余（含 /v1/chat/completions、Web UI、
+	// 管理 API）原样落到内层 handler，旧客户端的调用栈完全不变。
+	// 渠道清单注入 Router，用于校验模型名前缀并给出可读报错。
+	var channels []string
+	for k := range runtimes {
+		channels = append(channels, k.String())
+	}
+	compat := gateway.New(gateway.Config{
+		Inner:  inner,
+		APIKey: cfg.APIKey,
+		Router: gateway.Router{
+			Default:  cfg.Compat.DefaultChannel,
+			Map:      cfg.Compat.ModelMap,
+			Channels: gateway.SortChannels(channels),
+		},
+		MaxTokensCap: cfg.Compat.MaxTokensCap,
+	})
+	mux := http.NewServeMux()
+	compat.Routes(mux) // POST /v1/responses · /v1/messages · /v1/messages/count_tokens
+	mux.Handle("/", inner)
+	if compat != nil {
+		log.Printf("三接口兼容层已启用：default_channel=%q max_tokens_cap=%d model_map=%d 条",
+			cfg.Compat.DefaultChannel, cfg.Compat.MaxTokensCap, len(cfg.Compat.ModelMap))
+	}
+	appInst.SetHandler(inner)
+	appInst.SetRootHandler(mux)
+	compat.SetAPIKeySource(inner.CurrentAPIKey) // 面板改 API-Key 后，兼容层立即跟随
 
 	if err := appInst.StartServer(); err != nil {
 		log.Printf("listen %s failed: %v（面板中将提示）", cfg.Listen.Addr(), err)
@@ -251,22 +280,22 @@ func main() {
 			}
 		}()
 		systray.Run(trayIconICO, "wild-work — 渠道聚合代理", systray.Actions{
-		OpenUI: func() {
-			_ = platform.OpenURL(fmt.Sprintf("http://%s:%d/", displayHost(cfg), cfg.Listen.Port))
-		},
-		OpenLog: func() {
-			if err := appInst.OpenLogFile(); err != nil {
-				log.Printf("open log: %v", err)
-			}
-		},
-		Quit: func() {
-			if platform.AskYesNo("wild-work", "确定退出 wild-work 吗？") {
-				stop()
-				appInst.Stop()
-				os.Exit(0)
-			}
-		},
-	})
+			OpenUI: func() {
+				_ = platform.OpenURL(fmt.Sprintf("http://%s:%d/", displayHost(cfg), cfg.Listen.Port))
+			},
+			OpenLog: func() {
+				if err := appInst.OpenLogFile(); err != nil {
+					log.Printf("open log: %v", err)
+				}
+			},
+			Quit: func() {
+				if platform.AskYesNo("wild-work", "确定退出 wild-work 吗？") {
+					stop()
+					appInst.Stop()
+					os.Exit(0)
+				}
+			},
+		})
 	}()
 }
 
@@ -276,7 +305,6 @@ func displayHost(cfg *config.Config) string {
 	}
 	return cfg.Listen.Host
 }
-
 
 // fatal 记录日志并弹出系统提示后退出。
 func fatal(format string, args ...any) {

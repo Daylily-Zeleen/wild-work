@@ -256,30 +256,24 @@ type CheckinResult struct {
 }
 
 // RunCheckinNow 立即对所有账号执行签到 + 余额刷新 + 解冻。
-// 冷却中的账号也参与（签到就是为了解冻它们）；禁用的跳过。
+// 禁用的账号也签到（停用仅影响 API 路由，签到/保活仍需执行）。
 func (s *Scheduler) RunCheckinNow() {
 	name := s.name()
 	log.Printf("checkin batch start platform=%s accounts=%d", name, len(s.cfg.Pool.List()))
 	for _, st := range s.cfg.Pool.List() {
-		if st.Disabled {
-			log.Printf("checkin skip platform=%s uid=%s reason=disabled", name, st.UID)
-			continue
-		}
 		r := s.checkinOne(st.UID)
 		log.Printf("checkin result platform=%s uid=%s ok=%t msg=%s remain=%d has_remain=%t", name, st.UID, r.OK, r.Msg, r.Remain, r.HasRemain)
 	}
 	log.Printf("checkin batch done platform=%s", name)
 }
 
-// CheckinAccount 单个账号立即签到（禁用跳过），返回该账号结果。
+// CheckinAccount 单个账号立即签到（停用不受影响，仅路由受限），返回该账号结果。
 func (s *Scheduler) CheckinAccount(uid string) (CheckinResult, error) {
 	st, ok := s.cfg.Pool.Status(uid)
 	if !ok {
 		return CheckinResult{}, fmt.Errorf("unknown account %s", uid)
 	}
-	if st.Disabled {
-		return CheckinResult{}, fmt.Errorf("account %s disabled", uid)
-	}
+	_ = st // 不论停用与否都签到
 	return s.checkinOne(uid), nil
 }
 
@@ -397,14 +391,11 @@ func isSessionDead(err error) bool {
 }
 
 // RunKeepaliveNow 立即对所有账号刷新 token；session 死亡的自动禁用。
+// 禁用的账号也保活（停用仅影响 API 路由）。
 func (s *Scheduler) RunKeepaliveNow() {
 	name := s.name()
 	log.Printf("refresh batch start platform=%s", name)
 	for _, st := range s.cfg.Pool.List() {
-		if st.Disabled {
-			log.Printf("refresh skip platform=%s uid=%s reason=disabled", name, st.UID)
-			continue
-		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.RefreshToken == "" {
 			msg := "no refresh token"

@@ -192,7 +192,11 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// SetAPIKey 运行时修改内层 API Key（面板可调用）。
 func (h *Handler) SetAPIKey(key string) { h.apiMu.Lock(); defer h.apiMu.Unlock(); h.cfg.APIKey = key }
+
+// CurrentAPIKey 读取当前生效的 API Key（供外层兼容层跟随面板修改）。
+func (h *Handler) CurrentAPIKey() string { return h.currentAPIKey() }
 func (h *Handler) currentAPIKey() string {
 	h.apiMu.RLock()
 	defer h.apiMu.RUnlock()
@@ -355,6 +359,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_model", err.Error())
 		return
 	}
+	clientModel := peek.Model // 客户端请求的原始模型名（含 channel/ 前缀），回填进响应
 	body, err = rewriteModel(body, model)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -415,6 +420,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				rt.Pool.Disable(acct.UID, "session dead")
 			case provider.ErrNotFound:
 				rt.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, "upstream 404")
+			case provider.ErrContentBlocked, provider.ErrPromptTooLong:
+				// 内容拦截/上下文超限：不冷却不熔断不计错，直接透传原文回客户端。
+				// 这些是请求内容问题，与账号健康无关，轮转白费时间且浪费好号配额。
+				transparentError(w, status, respBody)
+				return
+			case provider.ErrWafBlock, provider.ErrAccountFault, provider.ErrModelBlocked:
+				// 账号级风控/故障/模型不存在：软冷却，不累计错误计数。
+				rt.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, kind.String())
+				transparentError(w, status, respBody)
+				return
 			case provider.ErrServer:
 				if rt.NoCooldownOnServerError {
 					// 该渠道声明 5xx 为上游网关抖动（账号本身健康），
@@ -437,10 +452,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		rt.Pool.NoteSuccess(acct.UID)
 		h.stickySuccess(rt)
 		if peek.Stream {
-			_ = rt.Upstream.Stream(w, rc)
+			_ = rt.Upstream.Stream(w, rc, clientModel)
 			return
 		}
-		resp, err := rt.Upstream.Aggregate(rc)
+		resp, err := rt.Upstream.Aggregate(rc, clientModel)
 		if err != nil {
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			return
@@ -537,6 +552,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeOpenAIError(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]any{"error": map[string]any{"message": msg, "type": "api_error", "code": code}})
+}
+
+// transparentError 上游错误原文透传：status+body 原样写回，不包装。
+func transparentError(w http.ResponseWriter, status int, body []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
 }
 
 func WorkBuddyStaticModels() []provider.ModelInfo {
