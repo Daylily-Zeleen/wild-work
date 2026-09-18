@@ -81,7 +81,20 @@ body {
 .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 .btn.danger:hover { background: #b91c1c; }
 .btn.small { padding: 5px 10px; font-size: 13px; }
+.btn.tiny { padding: 2px 8px; font-size: 11px; border-radius: 6px; color: var(--primary); }
+.btn.tiny:hover { background: #eef2ff; border-color: var(--primary); }
 .panel-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* 模型映射编辑器 */
+.map-editor {
+  margin-top: 8px; padding: 8px; border: 1px solid var(--border);
+  border-radius: var(--radius); background: #fafbfc;
+}
+.map-text {
+  width: 100%; font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+  line-height: 1.6; padding: 6px 8px; resize: vertical; box-sizing: border-box;
+}
+.map-editor .preset { display: inline-block; margin: 0 4px 4px 0; }
 
 /* 账号卡片网格 */
 .acct-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
