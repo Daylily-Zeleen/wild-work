@@ -6,7 +6,10 @@
 
 ## 功能
 
+- **三接口协议兼容**：`/v1/chat/completions`（OpenAI Chat）+ `/v1/responses`（OpenAI Responses）+ `/v1/messages`（Anthropic Messages，含 `count_tokens`），可直接接入 `codex` CLI 与 `claude` CLI
+- **请求体指纹脱敏**：自动清除 Claude Code / Codex CLI 注入的模板句，防止上游 11128 内容拦截
 - **OpenAI 兼容代理**：`/v1/chat/completions`、`/v1/models`，支持流式/非流式，模型前缀路由
+- **错误分类精细化**：区分「请求问题」与「账号问题」——内容拦截/上下文超限不罚号，限流/风控/账号故障分级冷却，429 不再误判余额耗尽
 - **四渠道聚合**：WorkBuddy(CodeBuddy) + WorkBuddy 国际版 + TraeWork + Qoder，模型前缀路由，粘性路由优先复用账号以提升会话缓存利用率
 - **自动签到**：每日定时签到领额度，token 保活，冷却状态机
 - **自动领日活奖励**（WorkBuddy 国际版）：定时自动用免费模型对话保活，自动领取每日活跃奖励，无需手动签到
@@ -14,6 +17,7 @@
 - **系统托盘**：常驻右下角，双击打开面板，右键菜单操作
 - **跨平台**：Windows（完整支持）、macOS（代码已就绪，CI 构建）、Linux（无头模式）
 - **developer→system 角色转换**：自动将下游 Agent 发送的 `<developer>` 角色改写为 `<system>`，避免上游触发内容过滤
+- **上游协议头仿真**：出站自动注入官方客户端指纹头（`X-CodeBuddy-Request`、`X-Machine-ID` 等），降低风控误判风险
 
 ## 项目渊源
 
@@ -146,6 +150,66 @@ API Key:  WildWorkAPI
 ```
 
 模型 ID 需带渠道前缀：`workbuddy/<model>`、`workbuddyai/<model>`、`traework/<model>`、`qoder/<model>`。
+
+### 4. 三种接口协议
+
+除 OpenAI Chat Completions 外，同一端口还兼容 **OpenAI Responses** 与 **Anthropic Messages**，
+可用官方 CLI 直接接入（无需改代码）：
+
+| 端点 | 协议 | 适用客户端 |
+|------|------|-----------|
+| `POST /v1/chat/completions` | OpenAI Chat | 大多数第三方客户端、`openai` SDK |
+| `POST /v1/responses` | OpenAI Responses | `codex` CLI、`openai` SDK 的 Responses API |
+| `POST /v1/messages` | Anthropic Messages | `claude` CLI、`anthropic` SDK |
+| `POST /v1/messages/count_tokens` | Anthropic count_tokens | Claude Code 上下文预算用 |
+
+鉴权：OpenAI 侧用 `Authorization: Bearer <API Key>`；Anthropic 侧 `x-api-key: <API Key>`
+或 `Authorization: Bearer` 均可。
+
+**模型名可省略渠道前缀**，在 `config.json` 的 `compat` 段配置映射：
+
+```json
+"compat": {
+  "default_channel": "workbuddy",
+  "max_tokens_cap": 32000,
+  "model_map": {
+    "claude-*": "workbuddy/glm-5.2",
+    "gpt-5*": "workbuddy/deepseek-v4-pro"
+  }
+}
+```
+
+- 带 `channel/` 前缀的模型名始终优先（如 `workbuddy/hy3`），行为与旧版一致
+- 无前缀时依次尝试：`model_map` 精确匹配 → 通配匹配（key 以 `*` 结尾）→ `default_channel`
+- `max_tokens_cap` 用于封顶客户端的 `max_tokens`（Anthropic 客户端常发 64000，
+  超出部分上游会直接 400）；设 `0` 表示不限制
+
+**Codex CLI 配置示例**（`~/.codex/config.toml`）：
+
+```toml
+model = "traework/glm-5.2"
+model_provider = "wildwork"
+
+[model_providers.wildwork]
+name = "wildwork"
+base_url = "http://127.0.0.1:7863/v1"
+wire_api = "responses"
+env_key = "WILDWORK_KEY"
+```
+
+**Claude Code 配置示例**（环境变量）：
+
+```bash
+export ANTHROPIC_BASE_URL="http://127.0.0.1:7863"
+export ANTHROPIC_AUTH_TOKEN="WildWorkAPI"
+export ANTHROPIC_MODEL="traework/glm-5.2"
+```
+
+> ⚠️ **已知限制**：Responses 接口是无状态实现，不支持 `previous_response_id`
+> （会返回 400 并提示）。客户端需在 `input` 中携带完整历史（Codex CLI 默认如此）。
+> 另外 WorkBuddy 国内版/国际版上游对某些 agent 系统提示词（如 Codex CLI 自带的那份）
+> 会触发内容策略拦截（上游返回 `code=11128 Illegal API invocation from an unapproved channel`），
+> 实测 `traework/*`、`qoder/*`、部分 `workbuddy/*` 模型不受影响；如遇拦截请更换渠道模型。
 
 ## 面板操作指南
 

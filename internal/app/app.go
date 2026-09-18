@@ -32,7 +32,7 @@ import (
 )
 
 // Version 版本号。
-const Version = "2.1.0"
+const Version = "2.2.0"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -60,7 +60,8 @@ type App struct {
 	cfgPath  string
 	cfg      *config.Config
 	runtimes map[provider.Kind]*Runtime
-	handler  *server.Handler
+	handler  *server.Handler // 内层（保留强类型，用于 SetAPIKey/ChannelModels 等）
+	httpRoot http.Handler    // 对外暴露的根 handler，可能为外层兼容层 mux（见 SetRootHandler）
 
 	mu      sync.Mutex // 保护 httpSrv / cfg 修改
 	httpSrv *http.Server
@@ -197,12 +198,32 @@ func (a *App) nextFire() time.Time {
 	return time.Time{}
 }
 
-// SetHandler 注入 HTTP handler（在 HandleAPI 注册后调用）。
-func (a *App) SetHandler(h *server.Handler) { a.handler = h }
+// SetHandler 注入内层 HTTP handler（在 HandleAPI 注册后调用）。
+func (a *App) SetHandler(h *server.Handler) {
+	a.handler = h
+	if a.httpRoot == nil {
+		a.httpRoot = h
+	}
+}
+
+// SetRootHandler 注入对外服务的根 handler（通常是「兼容层 mux + 内层 handler」的组合）。
+// httpRoot 为 nil 时回退到内层 handler。
+func (a *App) SetRootHandler(h http.Handler) { a.httpRoot = h }
 
 // ---------------------------------------------------------------------------
 // HTTP 服务
 // ---------------------------------------------------------------------------
+
+// serveHandler 返回实际对外服务的 handler（优先外层组合，其次内层）。
+func (a *App) serveHandler() http.Handler {
+	if a.httpRoot != nil {
+		return a.httpRoot
+	}
+	if a.handler == nil { // 避免 typed-nil 接口导致 http.Server 请求时 panic
+		return nil
+	}
+	return a.handler
+}
 
 // StartServer 按当前配置启动 HTTP 服务。
 func (a *App) StartServer() error {
@@ -218,7 +239,7 @@ func (a *App) serveLocked(addr string) error {
 		return err
 	}
 	srv := &http.Server{
-		Handler:           a.handler,
+		Handler:           a.serveHandler(),
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 	old := a.httpSrv
@@ -921,6 +942,33 @@ func (a *App) ServerRunning() bool {
 	return a.httpSrv != nil
 }
 
+// SetCompat 保存模型名路由配置（compat 段）并写回 config.json。
+func (a *App) SetCompat(defaultChannel string, maxTokensCap int, modelMap map[string]string) error {
+	if modelMap == nil {
+		modelMap = map[string]string{}
+	}
+	for _, v := range modelMap {
+		if strings.TrimSpace(v) == "" {
+			return fmt.Errorf("model_map 的值不能为空（应为 channel/model）")
+		}
+		if strings.Index(v, "/") <= 0 {
+			return fmt.Errorf("model_map 值 %q 需为 channel/model 形式", v)
+		}
+	}
+	a.mu.Lock()
+	a.cfg.Compat.DefaultChannel = defaultChannel
+	a.cfg.Compat.MaxTokensCap = maxTokensCap
+	a.cfg.Compat.ModelMap = modelMap
+	err := config.Save(a.cfg, a.cfgPath)
+	a.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	log.Printf("模型名路由配置已更新：default_channel=%q max_tokens_cap=%d model_map=%d 条",
+		defaultChannel, maxTokensCap, len(modelMap))
+	return nil
+}
+
 // LoginBusy 是否登录中。
 func (a *App) LoginBusy() bool {
 	a.muLogin.Lock()
@@ -961,6 +1009,14 @@ type State struct {
 	Version        string        `json:"version"`
 	Autostart      bool          `json:"autostart"`
 	Running        bool          `json:"running"`
+
+	// Compat 模型名路由配置（只读，保存走 POST /api/config/compat）
+	Compat struct {
+		DefaultChannel string            `json:"default_channel"`
+		MaxTokensCap   int               `json:"max_tokens_cap"`
+		ModelMap       map[string]string `json:"model_map"`
+		Channels       []string          `json:"channels"` // 可用渠道列表（供 UI 下拉）
+	} `json:"compat"`
 }
 
 // GetState 返回面板初始数据。
@@ -977,6 +1033,16 @@ func (a *App) GetState() State {
 		Autostart:      a.AutostartEnabled(),
 		Running:        a.ServerRunning(),
 	}
+	st.Compat.DefaultChannel = a.cfg.Compat.DefaultChannel
+	st.Compat.MaxTokensCap = a.cfg.Compat.MaxTokensCap
+	st.Compat.ModelMap = a.cfg.Compat.ModelMap
+	if st.Compat.ModelMap == nil {
+		st.Compat.ModelMap = map[string]string{}
+	}
+	for k := range a.runtimes {
+		st.Compat.Channels = append(st.Compat.Channels, k.String())
+	}
+	sort.Strings(st.Compat.Channels)
 	st.Accounts = a.accountViews()
 	return st
 }
@@ -1195,6 +1261,19 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if err := a.SetAutostart(req.On); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("POST /api/config/compat", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			DefaultChannel string            `json:"default_channel"`
+			MaxTokensCap   int               `json:"max_tokens_cap"`
+			ModelMap       map[string]string `json:"model_map"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := a.SetCompat(req.DefaultChannel, req.MaxTokensCap, req.ModelMap); err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}

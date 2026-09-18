@@ -33,6 +33,11 @@ const (
 	ErrNotFound                   // 404 上游偶发 → 短冷却不累计 errCount
 	ErrServer                     // 5xx 上游故障
 	ErrClient                     // 其他 4xx / 业务错误
+	ErrContentBlocked             // 内容策略拦截（400 + 审核文案）→ 不罚账号，透传原文
+	ErrPromptTooLong              // 11115 上下文超限 → 请求级错误，不罚号不轮转，透传原文
+	ErrWafBlock                   // 403 + 非业务信封（WAF 拦截页/空体）→ 账号软冷却
+	ErrAccountFault               // 账号级授权/配额故障（11140/14017）→ 冷却轮换
+	ErrModelBlocked               // 11102 该后端无此模型 → (账号,模型) 负缓存避让
 )
 
 func (k ErrKind) String() string {
@@ -49,6 +54,16 @@ func (k ErrKind) String() string {
 		return "server"
 	case ErrClient:
 		return "client"
+	case ErrContentBlocked:
+		return "content_blocked"
+	case ErrPromptTooLong:
+		return "prompt_too_long"
+	case ErrWafBlock:
+		return "waf_block"
+	case ErrAccountFault:
+		return "account_fault"
+	case ErrModelBlocked:
+		return "model_blocked"
 	default:
 		return "none"
 	}
@@ -130,8 +145,12 @@ type Upstream interface {
 	UserResourceDetail(a *auth.Auth) (int64, []ResourceItem, error)
 	DailyCheckin(a *auth.Auth) error
 	Classify(status int, body string) ErrKind
-	Stream(w http.ResponseWriter, r io.Reader) error
-	Aggregate(r io.Reader) (map[string]any, error)
+
+	// Stream/Aggregate 的 model 参数是「客户端请求的原始模型名」（含 channel/ 前缀），
+	// 由调用方显式传入而非渠道内部记忆状态——后者在多账号并发下会串号。
+	// 实现方应在输出的 model 字段回填该值（上游常返回 "auto" 或裸名）。
+	Stream(w http.ResponseWriter, r io.Reader, model string) error
+	Aggregate(r io.Reader, model string) (map[string]any, error)
 }
 
 // ResourceItem 积分明细条目。

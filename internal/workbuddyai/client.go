@@ -4,10 +4,12 @@ package workbuddyai
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -25,12 +27,17 @@ type Client struct {
 // New 生产默认。配置连接池减少 TLS 握手。
 func New() *Client { return NewWithTimeout(120 * time.Second) }
 
-// NewWithTimeout 指定上游超时。
+// NewWithTimeout 指定上游超时。Transport 与 CN 同构：禁 h2 + Dial/keepalive/TLS 握手 + ResponseHeaderTimeout。
 func NewWithTimeout(timeout time.Duration) *Client {
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 15 * time.Second}
 	tr := &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 20,
-		IdleConnTimeout:     90 * time.Second,
+		DialContext:           dialer.DialContext,
+		TLSNextProto:          make(map[string]func(string, *tls.Conn) http.RoundTripper),
+		TLSHandshakeTimeout:   10 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       30 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
 	}
 	return &Client{
 		HTTP: &http.Client{Timeout: timeout, Transport: tr},
@@ -70,7 +77,7 @@ func commonHeaders(req *http.Request) {
 func chatHeaders(req *http.Request, a *auth.Auth) {
 	commonHeaders(req)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
+	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	} else {
@@ -87,7 +94,7 @@ func chatHeaders(req *http.Request, a *auth.Auth) {
 
 // billingHeaders 余额 / 签到接口头。
 func billingHeaders(req *http.Request, a *auth.Auth) {
-	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
+	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
 	if a.UID != "" {
@@ -101,6 +108,7 @@ func billingHeaders(req *http.Request, a *auth.Auth) {
 }
 
 // refreshHeaders refresh 端点专属头（X-Refresh-Token 只允许出现在这里）。
+// refreshHeaders refresh 端点专属头。调用方必须持有 a.Lock()，本函数直接读 RefreshToken。
 func refreshHeaders(req *http.Request, a *auth.Auth) {
 	commonHeaders(req)
 	req.Header.Set("Content-Type", "application/json")
@@ -108,7 +116,7 @@ func refreshHeaders(req *http.Request, a *auth.Auth) {
 	if a.EnterpriseID != "" {
 		req.Header.Set("X-Enterprise-Id", a.EnterpriseID)
 	}
-	req.Header.Set("X-Auth-Refresh-Source", "workbuddy")
+	req.Header.Set("X-Auth-Refresh-Source", "plugin")
 }
 
 // ---------------------------------------------------------------------------
@@ -495,7 +503,7 @@ func (c *Client) pokeActivity(a *auth.Auth) {
 func (c *Client) Classify(status int, body string) provider.ErrKind { return Classify(status, body) }
 
 // Stream 实现 provider.Upstream（国际版已是 OpenAI SSE，直接透传）。
-func (c *Client) Stream(w http.ResponseWriter, r io.Reader) error { return Stream(w, r) }
+func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) error { return Stream(w, r) }
 
 // Aggregate 实现 provider.Upstream。
-func (c *Client) Aggregate(r io.Reader) (map[string]any, error) { return Aggregate(r) }
+func (c *Client) Aggregate(r io.Reader, model string) (map[string]any, error) { return Aggregate(r) }

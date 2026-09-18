@@ -463,71 +463,47 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) { return c
 
 func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {
 	// 网页版 web_user_ent_usage：require_usage=true 返回每个包的 usage.credits_amount（实际用量），
-	// 剩余 = Σ(credits_limit - credits_amount)。
-	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpEntUsage, bytes.NewReader([]byte(`{"require_usage":true}`)))
-	if err != nil {
-		return 0, err
-	}
-	UgHeaders(req, a)
-	data, err := c.doJSON(req)
-	if err != nil {
-		return 0, err
-	}
-	var resp struct {
-		UserEntitlementPackList []struct {
-			EntitlementBaseInfo struct {
-				Quota struct {
-					CreditsLimit float64 `json:"credits_limit"`
-				} `json:"quota"`
-			} `json:"entitlement_base_info"`
-			Usage struct {
-				CreditsAmount float64 `json:"credits_amount"`
-			} `json:"usage"`
-		} `json:"user_entitlement_pack_list"`
-	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, fmt.Errorf("ent usage parse: %w", err)
-	}
-	remainF := 0.0
-	for _, p := range resp.UserEntitlementPackList {
-		remainF += p.EntitlementBaseInfo.Quota.CreditsLimit - p.Usage.CreditsAmount
-	}
-	return int64(remainF), nil
+	// 一个接口过时但本函数不该更新所有 package，像这样保留剩余的。
+	_, remain, _, err = c.fetchEntUsage(a)
+	return remain, err
 }
 
-// UserResourceDetail 查询 TraeWork 积分明细（每个套餐条目）。
-func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceItem, error) {
+// entPackage 上游权益包条目（UserEntUsage / UserResourceDetail 共用结构）。
+type entPackage struct {
+	EntitlementBaseInfo struct {
+		Quota struct {
+			CreditsLimit float64 `json:"credits_limit"`
+		} `json:"quota"`
+		PackageName string `json:"package_name"`
+		PackageType string `json:"package_type"`
+	} `json:"entitlement_base_info"`
+	DisplayDesc string  `json:"display_desc"`
+	GroupName   string  `json:"group_name"`
+	GroupType   int     `json:"group_type"`
+	Usage       struct {
+		CreditsAmount float64 `json:"credits_amount"`
+	} `json:"usage"`
+}
+
+// fetchEntUsage 调用上游积分接口，返回全部条目 + 可消耗余额（排除签到专用/免费积分）。
+// 返回值：(全部条目, 可消耗余额, 全余额含专用)
+func (c *Client) fetchEntUsage(a *auth.Auth) ([]entPackage, int64, int64, error) {
 	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpEntUsage, bytes.NewReader([]byte(`{"require_usage":true}`)))
 	if err != nil {
-		return 0, nil, err
+		return nil, 0, 0, err
 	}
 	UgHeaders(req, a)
 	data, err := c.doJSON(req)
 	if err != nil {
-		return 0, nil, err
+		return nil, 0, 0, err
 	}
 	var resp struct {
-		UserEntitlementPackList []struct {
-			EntitlementBaseInfo struct {
-				Quota struct {
-					CreditsLimit float64 `json:"credits_limit"`
-				}
-				PackageName string `json:"package_name"`
-				PackageType string `json:"package_type"`
-			} `json:"entitlement_base_info"`
-			DisplayDesc string `json:"display_desc"`
-			GroupName   string `json:"group_name"`
-			GroupType   int    `json:"group_type"`
-			Usage       struct {
-				CreditsAmount float64 `json:"credits_amount"`
-			} `json:"usage"`
-		} `json:"user_entitlement_pack_list"`
+		UserEntitlementPackList []entPackage `json:"user_entitlement_pack_list"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, nil, fmt.Errorf("ent usage parse: %w", err)
+		return nil, 0, 0, fmt.Errorf("ent usage parse: %w", err)
 	}
-	var total int64
-	items := make([]provider.ResourceItem, 0, len(resp.UserEntitlementPackList))
+	var usable, total int64
 	for _, p := range resp.UserEntitlementPackList {
 		limit := int64(p.EntitlementBaseInfo.Quota.CreditsLimit)
 		used := int64(p.Usage.CreditsAmount)
@@ -535,8 +511,30 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 		if remain < 0 {
 			remain = 0
 		}
+		// group_type==1 是签到专用积分，不宜计入可消耗余额（否则冷却误判）
+		if p.GroupType != 1 && limit > 0 {
+			usable += remain
+		}
 		total += remain
-		// 优先使用 group_name（如"每日签到"、"每月登录积分"），其次 display_desc，最后兜底
+	}
+	return resp.UserEntitlementPackList, usable, total, nil
+}
+
+// UserResourceDetail 查询 TraeWork 积分明细（每个套餐条目）。
+// 返回的 remain 为可消耗余额（pool 路由依据），items 包含全部条目（签到专用积分标记 [专用]）。
+func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceItem, error) {
+	packs, usable, _, err := c.fetchEntUsage(a)
+	if err != nil {
+		return 0, nil, err
+	}
+	items := make([]provider.ResourceItem, 0, len(packs))
+	for _, p := range packs {
+		limit := int64(p.EntitlementBaseInfo.Quota.CreditsLimit)
+		used := int64(p.Usage.CreditsAmount)
+		remain := limit - used
+		if remain < 0 {
+			remain = 0
+		}
 		name := p.GroupName
 		if name == "" {
 			name = p.DisplayDesc
@@ -550,6 +548,10 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 		if name == "" {
 			name = fmt.Sprintf("套餐 (group_type=%d)", p.GroupType)
 		}
+		// 签到专用积分在名称后标注，让 UI 明细表一眼可辨认
+		if p.GroupType == 1 {
+			name += " [专用]"
+		}
 		items = append(items, provider.ResourceItem{
 			Name:   name,
 			Total:  limit,
@@ -557,7 +559,7 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 			Remain: remain,
 		})
 	}
-	return total, items, nil
+	return usable, items, nil
 }
 
 func (c *Client) GetUserInfo(a *auth.Auth) (uid, nickname, enterpriseID string, err error) {
@@ -591,8 +593,12 @@ func (c *Client) GetUserInfo(a *auth.Auth) (uid, nickname, enterpriseID string, 
 }
 
 func (c *Client) Classify(status int, body string) provider.ErrKind { return Classify(status, body) }
-func (c *Client) Stream(w http.ResponseWriter, r io.Reader) error   { return Stream(w, r) }
-func (c *Client) Aggregate(r io.Reader) (map[string]any, error)     { return Aggregate(r) }
+func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) error {
+	return StreamWithModel(w, r, model)
+}
+func (c *Client) Aggregate(r io.Reader, model string) (map[string]any, error) {
+	return AggregateWithModel(r, model)
+}
 
 func truncate(s string, n int) string {
 	s = strings.TrimSpace(s)
