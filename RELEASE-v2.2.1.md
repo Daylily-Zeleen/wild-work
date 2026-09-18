@@ -1,18 +1,19 @@
-# wild-work v2.2.1 — 积分显示修正：可用/不可用拆分 + 有效期 + 明细翻页
+# wild-work v2.2.1 — 积分显示修正：可用/不可用拆分 + 有效期 + 明细翻页 + 401 自愈
 
-> 本版聚焦「积分到底有多少能用」这一件事，修正 TraeWork 可用余额虚高与面板数字误导。
+> 本版聚焦「积分到底有多少能用」这一件事，修正 TraeWork 可用余额虚高与面板数字误导，
+> 并解决「本地 token 看似有效但上游已拒绝」导致的积分恒 0。
 
 ## 修复
 
 ### 本地 token 看似有效、上游已拒绝 → 永久卡在 401（重要）
 
-**现象**：TraeWork 账号积分恒为 0，hover 不弹明细（接口 400）。
+**现象**：账号积分恒为 0，hover 不弹明细（接口 400）。
 
 **根因**：刷新时上游会**作废旧 access token**（refresh token 同时轮换）。若新 token 未落盘，
 或同一账号在另一实例/客户端上被刷新过，本地文件里就是**已被作废、但 `expiresAt` 仍在未来**的 token：
 
 ```
-本地 expiresAt = 2026-09-30 22:33（看起来还有 12 天）
+本地 expiresAt = 未来某时（看起来还有很多天）
 NeedsRefresh(10min) → false  ← 永远不会去刷新
 上游实际返回     → 401      ← 但 token 早已被作废
 ```
@@ -20,9 +21,9 @@ NeedsRefresh(10min) → false  ← 永远不会去刷新
 于是 `NeedsRefresh` 永远为假、永不重试，积分/明细永久为空。
 
 **修复**：不再只信任本地过期时间，对 401 本身做一次「refresh + 重试」，成功后写回磁盘。
-覆盖三条路径：积分刷新（`creditTotals`）、单账号刷新（`RefreshCredits`）、
-明细查询（`ResourceDetail`）、批量刷新（`RefreshAll`）、费率拉取（`RefreshPricing`，
-原先连 refresh 结果都没落盘）。
+覆盖五条路径：积分自动刷新、单账号刷新（`RefreshCredits`）、批量刷新（`RefreshAll`）、
+明细查询（`ResourceDetail`）、费率拉取（`RefreshPricing`，
+原先连 refresh 结果都没落盘，已一并补上）。
 
 **验证**（把 `accessToken` 改坏、保留有效 `refreshToken` 后启动）：
 
@@ -31,9 +32,6 @@ session dead, refreshing platform=traework uid=1096660468371514
 traework refresh success uid=1096660468371514 refresh_rotated=true expires_at=1790917166
 → 积分 2710/不可用 2600，明细 29 条正常，新 token 已写回磁盘
 ```
-
-> 另外：`RefreshPricing` 原先调 `RefreshToken` 后**没有** `SaveAtomic`——
-> refresh token 已轮换却不落盘，是造成上述「本地看似有效」的典型场景，已一并补上。
 
 ### TraeWork 可消耗余额虚高（重要）
 
@@ -84,8 +82,8 @@ traework refresh success uid=1096660468371514 refresh_rotated=true expires_at=17
 
 ### 面板：积分数字拆成「可用 / 不可用」
 
-- 账号卡片：`1828可用积分/4400不可用`（不可用额度降级为次要色）
-- 明细 tooltip 底部：`可用 1828　不可用 4400`（无不可用额度时只显示一个数字，不制造无意义的 0）
+- 账号卡片：`1828可用积分/4400不可用`（不可用额度降级为次要色），主界面直接可见，无需 hover
+- 明细 tooltip 底部：`可用 1828　不可用 4400`，与卡片口径一致
 - 明细表中不可用额度整行淡显 + 「不可用」角标
 
 ### 面板：明细分页与有效期列
@@ -95,14 +93,38 @@ traework refresh success uid=1096660468371514 refresh_rotated=true expires_at=17
 - 明细缓存随 `loadState()` 失效，避免刷新后 tooltip 仍显示旧余额
 - 限额为 0 的包（如 TraeWork 的免费 0 限额包）不再出现在明细里
 
+### 积分自动刷新覆盖全部渠道
+
+原来自动刷新只覆盖 WorkBuddy 国际版，其余渠道积分只随签到更新——
+签到间隔过长或查询失败时，面板数字长期不更新。现四渠道统一纳入循环：
+
+- 启动立即首刷一次，之后每 30 分钟；
+- qoder / workbuddyai 无签到活动，不自动刷就会一直显示旧值或 0；
+- traework / workbuddy(CN) 签到间隔过长，统一纳入才能及时自愈 401。
+
+### 旧版 state 兼容：无需删除 data 目录
+
+v2.2.0 的 `state-*.json` 无 `unusable` 字段，直接换二进制会让卡片只显示
+「xxx可用积分」而无不可用拆分（旧数字残留）。现已：
+
+- state 文件增加 `version` 字段（v2 = 可用/不可用拆分口径）；旧格式读入后标记余额口径不可信；
+- 卡片对这类账号显示「待刷新」（带说明），不把旧值当真值；
+- 配合全渠道首刷，启动几秒内自动变为真实拆分数字。
+
+**升级时保留 `data/` 目录即可**，无需删除或手工迁移。
+
 ## 内部改动
 
 - `provider.ResourceItem` 增加 `ExpireAt` / `Usable`；新增 `provider.Summarize()` 统一汇总小计
-- `pool.Status` / `AccountView` 增加 `UnusableCredits`，随 `state-*.json` 持久化（新增字段，向后兼容）
-- `pool.ReenableIfCredits(uid, remain, unusable)` 签名变更
+- `pool.Status` / `AccountView` 增加 `UnusableCredits` / `CreditsStale`，随 `state-*.json` 持久化
+- `pool.ReenableIfCredits(uid, remain, unusable)` 签名变更；`SetCredits` 并入 `SetCreditDetail`
 - 积分刷新路径改走 `UserResourceDetail` 单次请求，同时拿到可用余额与小计（原先只调 `UserResource`）
 - 三渠道 `UserResourceDetail` 增加 `Usable: true`（国内版/国际版/Qoder 无端点分区）
+- CI：tag 发版的 release note 改用仓库内 `RELEASE-<tag>.md`（缺失时回退自动生成）
 
 ## 升级说明
 
-无需迁移。旧 `state-*.json` 缺 `unusable` 字段时按 0 处理；启动后首次刷新积分即会填上真实值。
+- **保留 `data/` 目录直接替换二进制即可**：旧 `state-*.json` 缺 `unusable` 字段时,
+  面板会先显示「待刷新」，启动后自动刷新即变为真实拆分数字，无需手工迁移或删除目录；
+- 若某账号的 refresh token 本身已失效（日志出现 `refresh token is invalid`），
+  该账号需重新登录——这是唯一无法自愈的情况。
