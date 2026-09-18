@@ -124,13 +124,17 @@ Pi 不支持自动拉取模型列表，需要手动编辑 `~/.pi/agent/models.js
           "compat": { "maxTokensField": "max_tokens" }
         },
         {
-          "id": "qoder/qwen3.8-max",
-          "name": "Qwen3.8-Max (Qoder)",
+          "id": "workbuddyai/deepseek-v4.1-flash",
+          "name": "DeepSeek V4.1 Flash (WorkBuddy 国际版)",
           "reasoning": true,
-          "input": ["text"],
-          "contextWindow": 180000,
-          "maxTokens": 32000,
-          "compat": { "maxTokensField": "max_tokens" }
+          "input": ["text", "image"],
+          "contextWindow": 1000000,
+          "maxTokens": 128000,
+          "compat": {
+            "thinkingFormat": "deepseek",
+            "supportsReasoningEffort": true,
+            "maxTokensField": "max_tokens"
+          }
         }
       ]
     }
