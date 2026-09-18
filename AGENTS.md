@@ -189,6 +189,18 @@ python -c "b=open('dist/wild-work.exe','rb').read(); print('new:',b.count(b'2.1.
 # 期望：new >= 1 且 old == 0。若旧版本号仍在，说明构建未生效。
 ```
 
+### 发版（tag 触发）
+
+push `v*` tag → GitHub Actions 构建五平台产物并创建正式 release。
+**release note 用仓库根目录的 `RELEASE-<tag>.md`（手写摘要，面向用户）**，
+而不是 `--generate-notes`（那只给 commit 链接列表）；文件缺失时回退自动生成，不阻塞发版。
+
+```bash
+# 发版前确认：版本常量已 bump（internal/app/app.go const Version）、
+# RELEASE-vX.Y.Z.md 已写好且与 tag 名一致、dist/wild-work.exe 已本地重建验证
+git tag vX.Y.Z && git push origin vX.Y.Z
+```
+
 ## 9. 文档索引
 
 - [README.md](README.md) — 用户文档
