@@ -351,16 +351,24 @@ func (h *Handler) fetchRuntimeModels(rt *Runtime) []provider.ModelInfo {
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	body, err := ReadBodyLimited(r)
 	if err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
+		if errors.Is(err, errTooLarge) {
+			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large", err.Error())
+		} else {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
+		}
 		return
 	}
 	var peek struct {
 		Model  string `json:"model"`
 		Stream bool   `json:"stream"`
 	}
-	_ = json.Unmarshal(body, &peek)
+	// 解析错误不再静默（issue #30）：截断/损坏的 body 若吞掉错误会误报 invalid_model
+	if err := json.Unmarshal(body, &peek); err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body: "+err.Error())
+		return
+	}
 	rt, model, err := h.runtimeForModel(peek.Model)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_model", err.Error())
@@ -582,6 +590,28 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.WriteHeader(status)
 	_, _ = w.Write(raw)
 }
+
+// MaxRequestBody 请求体上限（8MiB）：server 与 gateway 共用，避免两处硬编码不同步。
+// 超限直接回 413 说真话，不做静默截断——截断后 JSON 解析失败会被误报成
+// invalid_model（issue #30），比直接拒绝更误导排查。
+const MaxRequestBody = 8 << 20
+
+// ReadBodyLimited 读取请求体：超过 MaxRequestBody 时回 413 并返回错误。
+// 用 LimitReader(max+1) 多读 1 字节以区分「恰好 max」与「超限」。
+func ReadBodyLimited(r *http.Request) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, MaxRequestBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) > MaxRequestBody {
+		_ = r.Body.Close()
+		return nil, errTooLarge
+	}
+	return raw, nil
+}
+
+// errTooLarge 超限哨兵错误（调用方据此回 413）。
+var errTooLarge = fmt.Errorf("request body exceeds limit of %d bytes; please reduce conversation context", MaxRequestBody)
 
 func writeOpenAIError(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]any{"error": map[string]any{"message": msg, "type": "api_error", "code": code}})
