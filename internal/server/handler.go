@@ -109,7 +109,14 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	if cfg.WebUI != nil {
-		h.mux.Handle("/", http.FileServer(http.FS(cfg.WebUI)))
+		// no-cache 强制浏览器每次 revalidate：embed 资源随二进制更新，若不加，
+		// 浏览器长期用旧缓存会出现界面与后端版本不匹配（如新字段不渲染）。
+		// 文件未变时 FileServer 回 304，开销可忽略。
+		webSrv := http.FileServer(http.FS(cfg.WebUI))
+		h.mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Cache-Control", "no-cache")
+			webSrv.ServeHTTP(w, r)
+		}))
 	}
 	if cfg.AttachAPI != nil {
 		cfg.AttachAPI(h.mux)
@@ -499,7 +506,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) runtimeForModel(model string) (*Runtime, string, error) {
 	parts := strings.SplitN(strings.TrimSpace(model), "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return nil, "", fmt.Errorf("model must use explicit prefix: workbuddy/<model> / traework/<model> / qoder/<model>")
+		return nil, "", fmt.Errorf("model must use explicit prefix: workbuddy/<model> / traework/<model> / qoder/<model> / qwenwork/<model>")
 	}
 	kind := provider.Kind(parts[0])
 	rt := h.cfg.Runtimes[kind]
