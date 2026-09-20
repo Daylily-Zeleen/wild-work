@@ -37,7 +37,11 @@
   旧版界面，替换二进制后面板不更新（需 Ctrl+F5）。**本版升级后普通刷新（F5）一次，
   之后版本升级界面自动跟随**；
 - TraeWork 登录失败时回调页展示具体原因（此前失败也显示「登录已完成」）；
-- `/api/state` 透传临期字段（内部中间层遗漏导致后端已统计但界面不显示）。
+- `/api/state` 透传临期字段（内部中间层遗漏导致后端已统计但界面不显示）；
+- **请求体超 8MiB 误报 invalid_model**（[#30](https://github.com/rockswang/wild-work/issues/30)）：
+  长对话上下文累积超 8MiB 后，请求体被静默截断、JSON 解析失败被吞，
+  误报成「模型名缺前缀」误导排查。现超限明确回 **413 request_too_large**，
+  非法 JSON 回 400 invalid_request；`/v1/responses` 与 `/v1/messages` 同步修复。
 
 ## 升级说明
 
